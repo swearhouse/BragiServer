@@ -15,6 +15,7 @@ from bragi_server import storage
 
 
 TOKEN_LIFETIME = 21600
+CAST_TOKEN_LIFETIME = 7 * 24 * 60 * 60
 MAX_TOKENS = 1024
 MAX_URL_LENGTH = 16384
 UPSTREAM_TIMEOUT = 15
@@ -42,6 +43,14 @@ class AudioToken:
     username: str
     credential_fingerprint: str = field(repr=False)
     url: str = field(repr=False)
+    expires_at: float
+
+
+@dataclass(frozen=True)
+class CastQueueToken:
+    username: str
+    credential_fingerprint: str = field(repr=False)
+    videos: tuple[str, ...] = field(repr=False)
     expires_at: float
 
 
@@ -98,6 +107,42 @@ class AudioTokenStore:
             return
         with self._lock:
             self._entries.pop(hashlib.sha256(token.encode("ascii")).digest(), None)
+
+
+class CastQueueTokenStore:
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._entries: dict[bytes, CastQueueToken] = {}
+        self._users_revision: tuple[int, int, int, int, int] | None = None
+
+    def _sync(self, revision: tuple[int, int, int, int, int]) -> None:
+        if self._users_revision != revision:
+            self._entries.clear()
+            self._users_revision = revision
+        now = time.monotonic()
+        for key in [key for key, entry in self._entries.items() if entry.expires_at <= now]:
+            del self._entries[key]
+
+    def issue(
+        self, username: str, fingerprint: str, videos: tuple[str, ...],
+        revision: tuple[int, int, int, int, int],
+    ) -> str:
+        with self._lock:
+            self._sync(revision)
+            if len(self._entries) >= MAX_TOKENS:
+                raise TokenCapacityError
+            token = secrets.token_urlsafe(32)
+            self._entries[hashlib.sha256(token.encode("ascii")).digest()] = CastQueueToken(
+                username, fingerprint, videos, time.monotonic() + CAST_TOKEN_LIFETIME
+            )
+            return token
+
+    def get(self, token: str, revision: tuple[int, int, int, int, int]) -> CastQueueToken | None:
+        with self._lock:
+            self._sync(revision)
+            if not _TOKEN.fullmatch(token):
+                return None
+            return self._entries.get(hashlib.sha256(token.encode("ascii")).digest())
 
 
 def validate_url(url: str) -> tuple[str, str]:

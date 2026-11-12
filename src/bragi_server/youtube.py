@@ -74,8 +74,16 @@ def video_title(video_id: str) -> str:
 
 
 def resolve_audio(video_id: str) -> dict[str, str]:
+    return _resolve_audio(video_id, "bestaudio[ext=m4a][protocol=https]/bestaudio[ext=webm][protocol=https]")
+
+
+def resolve_cast_audio(video_id: str) -> dict[str, str]:
+    return _resolve_audio(video_id, "bestaudio[ext=m4a][protocol=https]")
+
+
+def _resolve_audio(video_id: str, audio_format: str) -> dict[str, str]:
     options = {
-        "format": "bestaudio[ext=m4a][protocol=https]/bestaudio[ext=webm][protocol=https]",
+        "format": audio_format,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,

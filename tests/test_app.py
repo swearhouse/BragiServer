@@ -10,6 +10,7 @@ from bragi_server.app import create_app
 from bragi_server.youtube import (
     ResolveError,
     resolve_audio,
+    resolve_cast_audio,
     youtube_video_id,
 )
 from bragi_server.event_log import BragiEventLog, EventLogError
@@ -79,6 +80,17 @@ def test_youtube_resolver_requests_direct_audio_and_returns_its_mime_type():
     )
     assert "[protocol=https]" in youtube_dl.call_args.args[0]["format"]
     assert result["content_type"] == "audio/mp4"
+
+
+def test_cast_resolver_requests_only_https_mp4_audio():
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "url": "https://r1.googlevideo.com/stream",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+        assert resolve_cast_audio("abcdefghijk")["content_type"] == "audio/mp4"
+    assert youtube_dl.call_args.args[0]["format"] == "bestaudio[ext=m4a][protocol=https]"
 
 
 def test_youtube_resolver_reports_yt_dlp_failure_without_exposing_details():

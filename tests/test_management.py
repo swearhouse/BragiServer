@@ -152,7 +152,9 @@ def test_malformed_playlist_file_is_not_overwritten(app):
 def test_admin_settings_persist_and_change_cors_immediately(app):
     directory = app.config["DATA_DIRECTORY"]
     settings_path = directory / "settings.json"
-    assert json.loads(settings_path.read_text(encoding="utf-8")) == {"api_allowed_origins": []}
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+        "api_allowed_origins": [], "cast_batch_size": 16,
+    }
     client = app.test_client()
     _login(client, "admin", "admin-pass")
     assert b"Settings" in client.get("/").data
@@ -162,16 +164,17 @@ def test_admin_settings_persist_and_change_cors_immediately(app):
     assert "Access-Control-Allow-Origin" not in client.options("/api/v1/resolve", headers=headers).headers
     response = _post(
         client, "/admin/settings",
-        api_allowed_origins=f"{origin}\nhttps://other.example.com:8443\n{origin}",
+        api_allowed_origins=f"{origin}\nhttps://other.example.com:8443\n{origin}", cast_batch_size="27",
     )
     assert response.status_code == 302
     assert json.loads(settings_path.read_text(encoding="utf-8")) == {
-        "api_allowed_origins": [origin, "https://other.example.com:8443"]
+        "api_allowed_origins": [origin, "https://other.example.com:8443"], "cast_batch_size": 27,
     }
     assert client.options("/api/v1/resolve", headers=headers).headers["Access-Control-Allow-Origin"] == origin
     restarted_client = create_app(data_directory=directory).test_client()
     assert restarted_client.options("/api/v1/resolve", headers=headers).headers["Access-Control-Allow-Origin"] == origin
-    assert _post(client, "/admin/settings", api_allowed_origins="").status_code == 302
+    assert storage.read_settings(directory)["cast_batch_size"] == 27
+    assert _post(client, "/admin/settings", api_allowed_origins="", cast_batch_size="27").status_code == 302
     assert "Access-Control-Allow-Origin" not in client.options("/api/v1/resolve", headers=headers).headers
 
 
@@ -181,12 +184,12 @@ def test_settings_are_admin_only_csrf_protected_and_reject_invalid_values(app):
     _login(client, "alice", "alice-pass")
     assert b"Settings</a>" not in client.get("/").data
     assert client.get("/admin/settings").status_code == 403
-    assert _post(client, "/admin/settings", api_allowed_origins="https://evil.example").status_code == 403
+    assert _post(client, "/admin/settings", api_allowed_origins="https://evil.example", cast_batch_size="16").status_code == 403
     _login(client, "admin", "admin-pass")
-    assert _post(client, "/admin/settings", api_allowed_origins="https://trusted.example").status_code == 302
+    assert _post(client, "/admin/settings", api_allowed_origins="https://trusted.example", cast_batch_size="16").status_code == 302
     assert client.post("/admin/settings", data={"api_allowed_origins": "https://evil.example"}).status_code == 400
     assert _post(client, "/admin/settings").status_code == 400
-    assert _post(client, "/admin/settings", api_allowed_origins="https://example.com/path").status_code == 400
+    assert _post(client, "/admin/settings", api_allowed_origins="https://example.com/path", cast_batch_size="16").status_code == 400
     assert storage.read_settings(app.config["DATA_DIRECTORY"])["api_allowed_origins"] == ["https://trusted.example"]
 
 
@@ -194,11 +197,46 @@ def test_settings_write_failure_does_not_change_live_cors(app):
     client = app.test_client()
     _login(client, "admin", "admin-pass")
     with patch("bragi_server.storage._write_json", side_effect=storage.StorageError("Write failed.")):
-        response = _post(client, "/admin/settings", api_allowed_origins="https://player.example.com")
+        response = _post(client, "/admin/settings", api_allowed_origins="https://player.example.com", cast_batch_size="16")
     assert response.status_code == 500
     assert storage.read_settings(app.config["DATA_DIRECTORY"])["api_allowed_origins"] == []
     preflight = client.options("/api/v1/resolve", headers={"Origin": "https://player.example.com"})
     assert "Access-Control-Allow-Origin" not in preflight.headers
+
+
+def test_cast_batch_setting_validates_and_preserves_legacy_settings(app):
+    directory = app.config["DATA_DIRECTORY"]
+    path = directory / "settings.json"
+    legacy = {"api_allowed_origins": ["https://trusted.example"]}
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    client = app.test_client()
+    _login(client, "admin", "admin-pass")
+    assert b'value="16"' in client.get("/admin/settings").data
+    for batch in ("", "0", "5001", "-1", "1.5", "true", "999999999999999999999"):
+        response = _post(client, "/admin/settings", api_allowed_origins="", cast_batch_size=batch)
+        assert response.status_code == 400
+        assert b"Cast batch size must be between" in response.data
+        assert json.loads(path.read_text(encoding="utf-8")) == legacy
+    assert _post(client, "/admin/settings", api_allowed_origins="https://trusted.example", cast_batch_size="5000").status_code == 302
+    assert storage.read_settings(directory) == {**legacy, "cast_batch_size": 5000}
+    assert _post(client, "/admin/settings", api_allowed_origins="https://trusted.example", cast_batch_size="1").status_code == 302
+    restarted = create_app(data_directory=directory)
+    assert storage.read_settings(restarted.config["DATA_DIRECTORY"])["cast_batch_size"] == 1
+    library = storage.read_playlists(directory)
+    library["alice"][0]["videos"] = [{"name": "Track", "link": "https://youtu.be/abcdefghijk"}]
+    storage._write_json(directory / "user_playlists.json", library)
+    auth = ("alice", "alice-pass")
+    queue = client.post("/api/v1/queue", json={"playlist_id": "p1"}, auth=auth).json["queue"]
+    response = client.post("/api/v1/cast-queue", json={"queue_id": queue["id"]}, auth=auth)
+    assert response.json["batch_size"] == 1
+
+
+@pytest.mark.parametrize("value", [0, 5001, True, "16", 1.5, None])
+def test_invalid_cast_batch_setting_fails_startup(app, value):
+    path = app.config["DATA_DIRECTORY"] / "settings.json"
+    path.write_text(json.dumps({"api_allowed_origins": [], "cast_batch_size": value}), encoding="utf-8")
+    with pytest.raises(storage.StorageError, match="invalid Cast batch size"):
+        create_app(data_directory=app.config["DATA_DIRECTORY"])
 
 
 def test_deleting_user_clears_their_temporary_queue(app):

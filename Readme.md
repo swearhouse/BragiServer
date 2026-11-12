@@ -99,7 +99,9 @@ The server uses its own JSON files in Audify-compatible shapes:
   of playlists with `id`, `name`, and ordered `videos`; each video has `name`
   and `link` strings.
 - `settings.json`: an object containing `api_allowed_origins`, a list of exact
-  allowed browser origins. The server creates it with an empty list if absent.
+  allowed browser origins, and `cast_batch_size`. New installations default to
+  an empty origin list and a Cast batch size of 16. Existing settings without
+  a batch size use 16 until saved.
 
 `user_playlists.json` is created when a playlist is first saved. A missing
 or malformed `users.json`, or malformed playlist or settings file, is reported instead of
@@ -168,6 +170,12 @@ audio stream:
 - `POST /api/v1/resolve` accepts `{"url": "https://youtu.be/<video-id>"}` and
   returns `{"audio": {"url": "...", "title": "...", "content_type": "..."}}`.
   Invalid input returns 400; a resolution failure returns 422.
+- `POST /api/v1/cast-queue` accepts `{"queue_id": "<current queue id>"}`
+  and returns a seven-day bearer token and `batch_size` for an immutable queue snapshot.
+  `GET /api/v1/cast-stream/<index>?token=<token>` resolves that track to MP4
+  audio on demand and redirects to its HTTPS Googlevideo URL. It returns 401
+  for invalid tokens, 404 for an invalid index, and 422 if resolution fails.
+  The Cast receiver must be able to reach both BragiServer and Googlevideo.
 - `POST /api/v1/audio-proxy` accepts `{"url": "<resolved audio URL>"}` with
   Basic authentication and returns `{"proxy_url": "/api/v1/audio-stream?token=...",
   "expires_in": 21600}`. The relative URL carries a bearer token; its GET
@@ -190,10 +198,8 @@ curl --user 'USERNAME' https://bragi.example/api/v1/playlists
 ```
 
 Curl prompts for the password. Do not put credentials in command history or
-logs. The resolved audio URL is temporary and may expire or fail on a
-Chromecast; Chromecast continues to use that direct URL without proxying or
-refresh. Do not log or publicly share it.
-This API does not yet prepare Cast queues or manage playback.
+logs. Resolved audio URLs are temporary; do not log or publicly share them.
+The API issues on-demand Cast links but does not manage receiver playback.
 
 Audio proxy tokens are held in memory for up to six hours, are reusable for
 seeks, and are lost on restart. Any change to `users.json` invalidates all
@@ -203,22 +209,28 @@ Treat proxy URLs as credentials: do not log or share them. Configure any
 reverse proxy, access logger, monitoring, and analytics to omit the query
 string (or disable access logging for `/api/v1/audio-stream`); a full request
 URL contains the bearer token. Use HTTPS in production to protect it in transit.
+Cast queue links are also bearer credentials; omit their query strings or
+disable access logging for `/api/v1/cast-stream/` as well. They expire after
+seven days, server restart, or any change to `users.json`. The queue snapshot
+remains usable if the shared server queue is replaced or cleared.
 
 Queue order is a snapshot: shuffling never changes the saved playlist, and
 later playlist edits do not change an existing queue. Each user has one queue;
 starting another replaces it, so multiple clients for that user share it.
 Queues are held only in server memory and disappear on restart or user
-deletion. They contain YouTube links, not resolved audio URLs. The client must
-resolve tracks and load and control the Chromecast queue. The client also
-tracks playback status; the server does not know which track is playing.
-Replacing or clearing the server queue does not change a queue already loaded
-on a receiver. Long queues of temporary resolved URLs may expire before
-playback reaches later tracks.
+deletion. They contain YouTube links, not resolved audio URLs. The client loads
+and controls the Chromecast queue; the server does not know which track is
+playing. Replacing or clearing the server queue does not change a queue
+already loaded on a receiver. Redirects, seeking, unavailable songs, and
+playback after the sender closes require testing on the target receiver.
 
 Cross-origin browser access is disabled by default. Sign in as `admin` and
 open **Settings** to add exact origins, such as `https://player.example.com`
 or `https://other.example.com:8443`. Do not include paths or a trailing slash.
 Changes apply immediately and are saved in the persistent `settings.json`.
+The admin Settings page also controls Cast queue batch size (1–5000, default
+16); it applies when a new Cast queue is prepared. The selected song is still
+sent first, and the browser may split batches further to fit Cast messages.
 Allow only trusted applications: allowed origins can make authenticated
 requests. Same-origin browsers and native clients do not require this setting.
 The former `BRAGI_API_ALLOWED_ORIGINS` environment variable is no longer used;

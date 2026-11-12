@@ -549,6 +549,67 @@ def test_resolve_validates_url_and_returns_temporary_audio(app):
     assert "secret" not in log
 
 
+def test_cast_queue_resolves_on_demand_and_preserves_snapshot(app):
+    client = app.test_client()
+    auth = ("alice", "alice-pass")
+    queue = client.post("/api/v1/queue", json={"playlist_id": "p1"}, auth=auth).json["queue"]
+    with patch("bragi_server.client_api.resolve_cast_audio", return_value={
+        "url": "https://r1.googlevideo.com/videoplayback?sig=secret",
+        "title": "Track", "content_type": "audio/mp4",
+    }) as resolver:
+        prepared = client.post("/api/v1/cast-queue", json={"queue_id": queue["id"]}, auth=auth)
+        assert prepared.status_code == 200 and prepared.json["expires_in"] == 7 * 86400
+        assert prepared.json["batch_size"] == 16
+        token = prepared.json["token"]
+        resolver.assert_not_called()
+        client.delete("/api/v1/queue", auth=auth)
+        response = client.get("/api/v1/cast-stream/0", query_string={"token": token},
+                              headers={"Range": "bytes=100-"})
+        assert response.status_code == 302
+        assert response.headers["Location"] == "https://r1.googlevideo.com/videoplayback?sig=secret"
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        resolver.assert_called_once_with("abcdefghijk")
+        assert client.get("/api/v1/cast-stream/1", query_string={"token": token}).status_code == 404
+        assert client.get("/api/v1/cast-stream/0").status_code == 401
+        assert client.get("/api/v1/cast-stream/0?token=bad").status_code == 401
+    with patch("bragi_server.client_api.resolve_cast_audio", side_effect=ResolveError("unavailable")):
+        assert client.get("/api/v1/cast-stream/0", query_string={"token": token}).status_code == 422
+    with patch("bragi_server.client_api.resolve_cast_audio", return_value={
+        "url": "https://evil.example/stream", "title": "Track", "content_type": "audio/mp4",
+    }):
+        assert client.get("/api/v1/cast-stream/0", query_string={"token": token}).status_code == 502
+
+
+def test_cast_queue_auth_stale_expiry_and_restart(app):
+    client = app.test_client()
+    auth = ("alice", "alice-pass")
+    assert client.post("/api/v1/cast-queue", json={"queue_id": "wrong"}).status_code == 401
+    assert client.post("/api/v1/cast-queue", json={}, auth=auth).status_code == 400
+    assert client.post("/api/v1/cast-queue", json={"queue_id": "wrong"}, auth=auth).status_code == 409
+    queue = client.post("/api/v1/queue", json={"playlist_id": "p1"}, auth=auth).json["queue"]
+    with patch("bragi_server.audio_proxy.time.monotonic", return_value=100):
+        token = client.post("/api/v1/cast-queue", json={"queue_id": queue["id"]}, auth=auth).json["token"]
+    restarted = create_app(data_directory=app.config["DATA_DIRECTORY"]).test_client()
+    assert restarted.get("/api/v1/cast-stream/0", query_string={"token": token}).status_code == 401
+    with patch("bragi_server.audio_proxy.time.monotonic", return_value=100 + 7 * 86400):
+        assert client.get("/api/v1/cast-stream/0", query_string={"token": token}).status_code == 401
+    token = client.post("/api/v1/cast-queue", json={"queue_id": queue["id"]}, auth=auth).json["token"]
+    path = app.config["DATA_DIRECTORY"] / "users.json"
+    users = json.loads(path.read_text(encoding="utf-8"))
+    users["users"][0]["password"] = "changed"
+    path.write_text(json.dumps(users), encoding="utf-8")
+    assert client.get("/api/v1/cast-stream/0", query_string={"token": token}).status_code == 401
+
+
+def test_cast_queue_uses_current_server_batch_setting(app):
+    client = app.test_client()
+    auth = ("alice", "alice-pass")
+    queue = client.post("/api/v1/queue", json={"playlist_id": "p1"}, auth=auth).json["queue"]
+    storage.save_settings(app.config["DATA_DIRECTORY"], [], 37)
+    assert client.post("/api/v1/cast-queue", json={"queue_id": queue["id"]}, auth=auth).json["batch_size"] == 37
+
+
 def test_storage_failure_is_json_and_logged(app):
     (app.config["DATA_DIRECTORY"] / "user_playlists.json").write_text("{bad", encoding="utf-8")
     response = app.test_client().get("/api/v1/playlists", auth=("alice", "alice-pass"))

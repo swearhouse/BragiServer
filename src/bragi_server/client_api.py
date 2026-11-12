@@ -3,11 +3,12 @@ import http.client
 import random
 import uuid
 
-from flask import Blueprint, Response, current_app, g, jsonify, request, url_for
+from flask import Blueprint, Response, current_app, g, jsonify, redirect, request, url_for
 
 from bragi_server import storage
 from bragi_server.audio_proxy import (
     CHUNK_SIZE,
+    CAST_TOKEN_LIFETIME,
     TOKEN_LIFETIME,
     AudioProxyError,
     InvalidAudioURL,
@@ -18,7 +19,7 @@ from bragi_server.audio_proxy import (
     validate_url,
 )
 from bragi_server.management import _fingerprint
-from bragi_server.youtube import MetadataError, ResolveError, resolve_audio, video_title, youtube_video_id
+from bragi_server.youtube import MetadataError, ResolveError, resolve_audio, resolve_cast_audio, video_title, youtube_video_id
 
 
 client_api = Blueprint("client_api", __name__, url_prefix="/api/v1")
@@ -85,11 +86,13 @@ def _authentication_required():
 
 @client_api.before_request
 def authenticate():
-    g.api_allowed_origins = storage.read_settings(
-        current_app.config["DATA_DIRECTORY"]
-    )["api_allowed_origins"]
+    settings = storage.read_settings(current_app.config["DATA_DIRECTORY"])
+    g.api_allowed_origins = settings["api_allowed_origins"]
+    g.cast_batch_size = settings["cast_batch_size"]
     if request.method == "OPTIONS":
         return "", 204
+    if request.endpoint == "client_api.cast_stream":
+        return None
     if request.endpoint == "client_api.audio_stream":
         if request.method == "HEAD":
             return jsonify(error="Method not allowed."), 405
@@ -329,6 +332,77 @@ def queue():
         }
         queues[g.api_username] = current
         return jsonify(queue=_with_thumbnails(current)), 201
+
+
+@client_api.post("/cast-queue")
+def create_cast_queue():
+    payload = request.get_json(silent=True)
+    queue_id = payload.get("queue_id") if isinstance(payload, dict) else None
+    if not isinstance(queue_id, str) or not queue_id:
+        return jsonify(error="Provide a queue ID."), 400
+    with current_app.extensions["playback_queues_lock"]:
+        if _authenticated_username() != g.api_username:
+            return _authentication_required()
+        queue = current_app.extensions["playback_queues"].get(g.api_username)
+        if queue is None or queue["id"] != queue_id:
+            return jsonify(error="The queue has changed. Create a new queue."), 409
+        credentials = request.authorization
+        if credentials is None or not isinstance(credentials.password, str):
+            return _authentication_required()
+        revision = users_revision(current_app.config["DATA_DIRECTORY"])
+        try:
+            token = current_app.extensions["cast_queue_tokens"].issue(
+                g.api_username, _fingerprint(credentials.password),
+                tuple(video["link"] for video in queue["videos"]), revision,
+            )
+        except TokenCapacityError:
+            current_app.logger.warning("Cast queue token capacity reached.")
+            return jsonify(error="Cast queues are at capacity. Try again later."), 503
+    return jsonify(token=token, expires_in=CAST_TOKEN_LIFETIME, batch_size=g.cast_batch_size)
+
+
+@client_api.get("/cast-stream/<int:index>")
+def cast_stream(index: int):
+    tokens = request.args.getlist("token")
+    if len(tokens) != 1:
+        return jsonify(error="Invalid or expired Cast queue."), 401
+    store = current_app.extensions["cast_queue_tokens"]
+    directory = current_app.config["DATA_DIRECTORY"]
+    with current_app.extensions["playback_queues_lock"]:
+        entry = store.get(tokens[0], users_revision(directory))
+        if entry is None:
+            return jsonify(error="Invalid or expired Cast queue."), 401
+        user = next((user for user in storage.read_users(directory)
+                     if user["username"] == entry.username), None)
+        if user is None or not hmac.compare_digest(
+            _fingerprint(user["password"]), entry.credential_fingerprint
+        ):
+            return jsonify(error="Invalid or expired Cast queue."), 401
+        if index >= len(entry.videos):
+            return jsonify(error="Track not found."), 404
+        video_id = youtube_video_id(entry.videos[index])
+    if video_id is None:
+        return jsonify(error="Invalid YouTube video URL."), 422
+    try:
+        audio = resolve_cast_audio(video_id)
+        if audio["content_type"] != "audio/mp4":
+            raise ResolveError("No compatible MP4 audio stream was found.")
+        validate_url(audio["url"])
+    except ResolveError as error:
+        current_app.extensions["bragi_event_log"].record(
+            "resolve_error", str(error), context={"video_id": video_id}
+        )
+        current_app.logger.warning("Could not resolve Cast audio for video %s", video_id)
+        return jsonify(error="Could not resolve Cast audio."), 422
+    except InvalidAudioURL:
+        current_app.logger.warning("Cast audio resolver returned an unsupported destination.")
+        return jsonify(error="Could not access the audio source."), 502
+    with current_app.extensions["playback_queues_lock"]:
+        if store.get(tokens[0], users_revision(directory)) is not entry:
+            return jsonify(error="Invalid or expired Cast queue."), 401
+    response = redirect(audio["url"], code=302)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @client_api.post("/audio-proxy")

@@ -6,7 +6,7 @@ from threading import RLock
 from flask import Flask, jsonify
 
 from bragi_server import storage
-from bragi_server.audio_proxy import AudioTokenStore
+from bragi_server.audio_proxy import AudioTokenStore, CastQueueTokenStore
 from bragi_server.client_api import client_api
 from bragi_server.event_log import BragiEventLog
 from bragi_server.management import load_session_key, management
@@ -78,6 +78,7 @@ def create_app(data_directory: Path | str | None = None) -> Flask:
     app.extensions["playback_queues"] = {}
     app.extensions["playback_queues_lock"] = RLock()
     app.extensions["audio_proxy_tokens"] = AudioTokenStore()
+    app.extensions["cast_queue_tokens"] = CastQueueTokenStore()
     app.register_blueprint(management)
     app.register_blueprint(client_api)
 

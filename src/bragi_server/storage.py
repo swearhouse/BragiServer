@@ -9,6 +9,8 @@ from urllib.parse import parse_qs, urlsplit
 
 
 _lock = RLock()
+DEFAULT_CAST_BATCH_SIZE = 16
+MAX_CAST_BATCH_SIZE = 5000
 _YOUTUBE_HOSTS = {
     "youtube.com", "www.youtube.com", "m.youtube.com",
     "music.youtube.com", "youtu.be",
@@ -109,7 +111,9 @@ def _write_json(path: Path, data: object) -> None:
 
 def read_settings(directory: Path) -> dict:
     data = _read_json(directory / "settings.json")
-    origins = data.get("api_allowed_origins") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        raise StorageError("settings.json has an invalid format.")
+    origins = data.get("api_allowed_origins")
     if not isinstance(origins, list) or any(not isinstance(item, str) for item in origins):
         raise StorageError("settings.json has an invalid format.")
     try:
@@ -117,6 +121,10 @@ def read_settings(directory: Path) -> dict:
             raise ValueError("Origins must be distinct exact values.")
     except ValueError as error:
         raise StorageError("settings.json contains invalid API origins.") from error
+    batch_size = data.get("cast_batch_size", DEFAULT_CAST_BATCH_SIZE)
+    if type(batch_size) is not int or not 1 <= batch_size <= MAX_CAST_BATCH_SIZE:
+        raise StorageError("settings.json contains an invalid Cast batch size.")
+    data["cast_batch_size"] = batch_size
     return data
 
 
@@ -125,17 +133,25 @@ def initialize_settings(directory: Path) -> None:
         path = directory / "settings.json"
         missing = object()
         if _read_json(path, missing=missing) is missing:
-            _write_json(path, {"api_allowed_origins": []})
+            _write_json(path, {"api_allowed_origins": [], "cast_batch_size": DEFAULT_CAST_BATCH_SIZE})
         read_settings(directory)
 
 
-def save_allowed_origins(directory: Path, origins: list[str]) -> None:
+def save_settings(directory: Path, origins: list[str], batch_size: int) -> None:
     if parse_allowed_origins("\n".join(origins)) != origins:
         raise ValueError("Origins must be distinct exact values.")
+    if type(batch_size) is not int or not 1 <= batch_size <= MAX_CAST_BATCH_SIZE:
+        raise ValueError(f"Cast batch size must be between 1 and {MAX_CAST_BATCH_SIZE}.")
     with _lock:
         settings = read_settings(directory)
         settings["api_allowed_origins"] = origins
+        settings["cast_batch_size"] = batch_size
         _write_json(directory / "settings.json", settings)
+
+
+def save_allowed_origins(directory: Path, origins: list[str]) -> None:
+    with _lock:
+        save_settings(directory, origins, read_settings(directory)["cast_batch_size"])
 
 
 def read_users(directory: Path) -> list[dict[str, str]]:

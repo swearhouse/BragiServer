@@ -213,20 +213,27 @@ def settings():
     _admin_only()
     settings_data = storage.read_settings(_directory())
     origins_text = "\n".join(settings_data["api_allowed_origins"])
+    batch_text = str(settings_data["cast_batch_size"])
     if request.method == "POST":
         if "api_allowed_origins" not in request.form:
             return render_template(
-                "settings.html", origins=origins_text, error="Origins field is required."
+                "settings.html", origins=origins_text, batch_size=batch_text, error="Origins field is required."
             ), 400
         origins_text = request.form["api_allowed_origins"]
+        batch_text = request.form.get("cast_batch_size", "")
         try:
             origins = storage.parse_allowed_origins(origins_text)
+            if not re.fullmatch(r"[0-9]{1,4}", batch_text):
+                raise ValueError(f"Cast batch size must be between 1 and {storage.MAX_CAST_BATCH_SIZE}.")
+            batch_size = int(batch_text)
+            if not 1 <= batch_size <= storage.MAX_CAST_BATCH_SIZE:
+                raise ValueError(f"Cast batch size must be between 1 and {storage.MAX_CAST_BATCH_SIZE}.")
         except ValueError as error:
-            return render_template("settings.html", origins=origins_text, error=str(error)), 400
-        storage.save_allowed_origins(_directory(), origins)
+            return render_template("settings.html", origins=origins_text, batch_size=batch_text, error=str(error)), 400
+        storage.save_settings(_directory(), origins, batch_size)
         flash("Settings saved.")
         return redirect(url_for("management.settings"))
-    return render_template("settings.html", origins=origins_text)
+    return render_template("settings.html", origins=origins_text, batch_size=batch_text)
 
 
 @management.post("/admin/users")
