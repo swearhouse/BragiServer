@@ -1,0 +1,13 @@
+services:
+  bragi-server:
+    build: .
+    environment:
+      BRAGI_DATA_DIR: /var/lib/bragi-server
+      BRAGI_COOKIE_SECURE: "false"
+      BRAGI_LOG_LEVEL: INFO
+      WAITRESS_LOG_LEVEL: INFO
+    volumes:
+      - /DATA/AppData/bragi-server:/var/lib/bragi-server
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

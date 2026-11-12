@@ -1,0 +1,6 @@
+Flask<4.0,>=3.0
+yt-dlp>=2024.1.0
+waitress<4.0,>=3.0
+
+[test]
+pytest<9.0,>=8.0

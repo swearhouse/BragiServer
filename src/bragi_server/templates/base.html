@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}BragiServer{% endblock %}</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 58rem; margin: 0 auto; padding: 1rem; line-height: 1.5; }
+    nav { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; border-bottom: 1px solid #888; padding-bottom: .75rem; }
+    nav form { margin-left: auto; }
+    label { display: block; margin-top: .75rem; }
+    input, select, button, textarea { font: inherit; padding: .4rem; }
+    input, textarea { box-sizing: border-box; max-width: 100%; }
+    input[type="text"], input[type="password"], input[type="url"] { width: 100%; }
+    textarea { width: 100%; }
+    button { cursor: pointer; }
+    .card { border: 1px solid #888; border-radius: .4rem; padding: 1rem; margin: 1rem 0; }
+    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-top: .75rem; }
+    .actions form { margin: 0; }
+    .notice { border-left: .3rem solid #4587cf; padding: .5rem 1rem; background: light-dark(#edf5ff, #1d334a); }
+    .error { border-left-color: #db5e52; }
+    .muted { opacity: .8; }
+  </style>
+</head>
+<body>
+  <nav aria-label="Main navigation">
+    <strong>BragiServer</strong>
+    {% if session.get("username") %}
+      <a href="{{ url_for('management.playlists') }}">Playlists</a>
+      {% if session.get("username") == "admin" %}
+        <a href="{{ url_for('management.users') }}">Users</a>
+        <a href="{{ url_for('management.settings') }}">Settings</a>
+      {% endif %}
+      <span class="muted">Signed in as {{ session.username }}</span>
+      <form method="post" action="{{ url_for('management.logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit">Sign out</button>
+      </form>
+    {% endif %}
+  </nav>
+  {% for message in get_flashed_messages() %}
+    <p class="notice" role="status">{{ message }}</p>
+  {% endfor %}
+  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

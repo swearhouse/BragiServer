@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Playlists - BragiServer{% endblock %}
+{% block content %}
+<h1>Playlists</h1>
+{% if users %}
+<form method="get">
+  <label for="owner">User</label>
+  <select id="owner" name="owner">
+    {% for user in users %}
+      <option value="{{ user.username }}" {% if user.username == owner %}selected{% endif %}>{{ user.username }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Show playlists</button>
+</form>
+{% else %}
+<p>Managing playlists for {{ owner }}.</p>
+{% endif %}
+<p><a href="{{ url_for('management.edit_playlist', owner=owner) }}">Create playlist</a></p>
+{% for playlist in playlists %}
+  <section class="card">
+    <h2>{{ playlist.name }}</h2>
+    <p>{{ playlist.videos|length }} track(s)</p>
+    <div class="actions">
+      <a href="{{ url_for('management.edit_playlist', playlist_id=playlist.id, owner=owner) }}">Edit</a>
+      <form method="post" action="{{ url_for('management.remove_playlist', playlist_id=playlist.id) }}" onsubmit="return confirm('Delete this playlist?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="owner" value="{{ owner }}">
+        <button type="submit">Delete</button>
+      </form>
+    </div>
+  </section>
+{% else %}
+  <p>No playlists yet.</p>
+{% endfor %}
+{% endblock %}

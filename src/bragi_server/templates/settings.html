@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Settings - BragiServer{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label for="api_allowed_origins">Allowed browser origins for the client API</label>
+  <p class="muted">Enter one exact HTTP(S) origin per line, such as https://player.example.com:8443. Leave empty to disable cross-origin browser access. Only add trusted sites; they can make authenticated API requests.</p>
+  <textarea id="api_allowed_origins" name="api_allowed_origins" rows="6" spellcheck="false">{{ origins }}</textarea>
+  <div class="actions"><button type="submit">Save settings</button></div>
+</form>
+{% endblock %}
