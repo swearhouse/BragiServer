@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Error - BragiServer{% endblock %}
 {% block content %}
-<h1>Storage error</h1>
-<p role="alert">{{ message }}</p>
+<section class="panel">
+  <p class="eyebrow">Server management</p>
+  <h1>Storage error</h1>
+  <p role="alert">{{ message }}</p>
+</section>
 {% endblock %}

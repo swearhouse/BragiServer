@@ -34,7 +34,8 @@ receiver's reported state when connected, not present the server queue as
 proof that audio is playing. More details and unverified behavior are below.
 
 The playback API can create, rename, and delete playlists and add, replace, or remove
-tracks; reordering tracks and managing users remain in the server management UI.
+tracks. Track reordering is not currently supported; user management remains in
+the server management UI.
 `admin` has broader management UI access but
 the playback API restricts every account, including `admin`, to its own data.
 

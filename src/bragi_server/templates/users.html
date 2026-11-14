@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Users - BragiServer{% endblock %}
 {% block content %}
-<h1>Users</h1>
+<section class="panel">
+<div class="page-heading">
+  <p class="eyebrow">Server management</p>
+  <h1>Users</h1>
+</div>
 <h2>Add user</h2>
 <form method="post" action="{{ url_for('management.add_user') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -9,9 +13,9 @@
   <input id="username" name="username" type="text" maxlength="64" pattern="[A-Za-z0-9._-]+" autocomplete="off" required>
   <label for="password">Password</label>
   <input id="password" name="password" type="password" maxlength="256" autocomplete="new-password" required>
-  <div class="actions"><button type="submit">Create user</button></div>
+  <div class="actions"><button class="primary" type="submit">Create user</button></div>
 </form>
-<h2>Accounts</h2>
+<h2 class="section-heading">Accounts</h2>
 {% for user in users %}
   <div class="card">
     <strong>{{ user.username }}</strong>
@@ -19,14 +23,15 @@
       <span class="muted"> (administrator; cannot be deleted)</span>
     {% else %}
       <div class="actions">
-        <a href="{{ url_for('management.playlists', owner=user.username) }}">Manage playlists</a>
+        <a class="button" href="{{ url_for('management.playlists', owner=user.username, _anchor='owner-' ~ user.username) }}">Manage playlists</a>
         <form method="post" action="{{ url_for('management.remove_user') }}" onsubmit="return confirm('Delete this user and all their playlists?')">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <input type="hidden" name="username" value="{{ user.username }}">
-          <button type="submit">Delete user and playlists</button>
+          <button class="danger" type="submit">Delete user and playlists</button>
         </form>
       </div>
     {% endif %}
   </div>
 {% endfor %}
+</section>
 {% endblock %}

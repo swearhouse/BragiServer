@@ -85,7 +85,10 @@ files for local development or copy them into the CasaOS host data directory.
 Change any default passwords before sharing access.
 
 The `admin` username is the administrator and can create and delete users and
-manage any user's playlists and API settings. Other users manage only their own playlists.
+manage any user's playlists and API settings. The management playlist page
+shows every account's playlists to `admin`; other users see and manage only
+their own playlists. The management UI creates empty playlists and renames or
+deletes playlists; use a playback client to add, replace, or remove tracks.
 Deleting a user also removes their playlists; the `admin` account cannot be
 deleted in the UI. New usernames can contain letters, digits, `.`, `_`, and
 `-` (up to 64 characters). Password changes are not implemented in the UI;

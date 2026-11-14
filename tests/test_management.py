@@ -53,11 +53,30 @@ def test_login_requires_csrf_and_authentication(app):
 def test_regular_user_cannot_access_admin_or_other_users_playlists(app):
     client = app.test_client()
     _login(client, "alice", "alice-pass")
-    assert b"Alice mix" in client.get("/").data
+    response = client.get("/")
+    assert b"Alice mix" in response.data
+    assert b"Bob mix" not in response.data
+    assert b"Show playlists" not in response.data
     assert client.get("/admin/users").status_code == 403
     assert client.get("/?owner=bob").status_code == 403
     assert _post(client, "/playlists/p2/delete", owner="bob").status_code == 403
     assert storage.read_playlists(app.config["DATA_DIRECTORY"])["bob"][0]["id"] == "p2"
+
+
+def test_admin_sees_all_users_playlists_and_can_create_for_each(app):
+    client = app.test_client()
+    _login(client, "admin", "admin-pass")
+    response = client.get("/")
+    assert b"Alice mix" in response.data
+    assert b"Bob mix" in response.data
+    assert b"Show playlists" not in response.data
+    assert b'<select' not in response.data
+    for owner in ("admin", "alice", "bob"):
+        assert f'/playlists/new?owner={owner}'.encode() in response.data
+    assert b'/playlists/p1/edit?owner=alice' in response.data
+    assert b'/playlists/p2/edit?owner=bob' in response.data
+    assert b'name="owner" value="alice"' in response.data
+    assert b'name="owner" value="bob"' in response.data
 
 
 def test_admin_create_delete_user_and_their_playlists(app):
@@ -83,7 +102,7 @@ def test_playlist_create_edit_delete_persist_and_owner_isolation(app):
     assert response.status_code == 302
     library = storage.read_playlists(app.config["DATA_DIRECTORY"])
     playlist = library["alice"][-1]
-    assert [video["name"] for video in playlist["videos"]] == ["First", "Second"]
+    assert playlist["videos"] == []
     playlist_id = playlist["id"]
     response = _post(client, f"/playlists/{playlist_id}/edit", owner="alice", name="Updated")
     assert response.status_code == 302
@@ -93,13 +112,32 @@ def test_playlist_create_edit_delete_persist_and_owner_isolation(app):
     assert storage.read_playlists(app.config["DATA_DIRECTORY"])["bob"][0]["name"] == "Bob mix"
 
 
-def test_invalid_track_does_not_change_playlist(app):
+def test_playlist_edit_preserves_tracks_and_has_no_track_controls(app):
     client = app.test_client()
     _login(client, "alice", "alice-pass")
+    directory = app.config["DATA_DIRECTORY"]
+    first = {"name": "First", "link": "https://youtu.be/abcdefghijk"}
+    second = {"name": "Second", "link": "https://youtu.be/12345678901"}
+    storage.append_playlist_track(directory, "alice", "p1", first)
+    response = client.get("/playlists/p1/edit")
+    assert b"video_name" not in response.data
+    assert b"video_link" not in response.data
+    assert b"Add track" not in response.data
+    storage.append_playlist_track(directory, "alice", "p1", second)
     response = _post(
         client, "/playlists/p1/edit", owner="alice", name="Changed",
-        video_name="Bad", video_link="https://example.com/audio",
+        video_name="Injected", video_link="https://youtu.be/zzzzzzzzzzz",
     )
+    assert response.status_code == 302
+    playlist = storage.read_playlists(directory)["alice"][0]
+    assert playlist["name"] == "Changed"
+    assert playlist["videos"] == [first, second]
+
+
+def test_invalid_playlist_name_does_not_change_playlist(app):
+    client = app.test_client()
+    _login(client, "alice", "alice-pass")
+    response = _post(client, "/playlists/p1/edit", owner="alice", name="  ")
     assert response.status_code == 400
     assert storage.read_playlists(app.config["DATA_DIRECTORY"])["alice"][0]["name"] == "Alice mix"
 

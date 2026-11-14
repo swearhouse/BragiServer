@@ -5,44 +5,129 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}BragiServer{% endblock %}</title>
   <style>
-    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-    body { max-width: 58rem; margin: 0 auto; padding: 1rem; line-height: 1.5; }
-    nav { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; border-bottom: 1px solid #888; padding-bottom: .75rem; }
-    nav form { margin-left: auto; }
-    label { display: block; margin-top: .75rem; }
-    input, select, button, textarea { font: inherit; padding: .4rem; }
-    input, textarea { box-sizing: border-box; max-width: 100%; }
-    input[type="text"], input[type="password"], input[type="url"] { width: 100%; }
-    textarea { width: 100%; }
-    button { cursor: pointer; }
-    .card { border: 1px solid #888; border-radius: .4rem; padding: 1rem; margin: 1rem 0; }
-    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-top: .75rem; }
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #edf1f7;
+      background: #0b0e13;
+      --surface: #121720;
+      --border: #252e3c;
+      --muted: #8d9aab;
+      --accent: #8de0bd;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      background: radial-gradient(ellipse at 78% 0%, #18232a 0, #0b0e13 48rem);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .account-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; width: min(1200px, 100%); margin: 0 auto; padding: 16px 28px 0; }
+    .brand { margin-right: auto; color: #f2f5f8; font-size: 18px; font-weight: 750; letter-spacing: -.04em; text-decoration: none; }
+    .brand span { margin-left: 4px; color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: 0; }
+    nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    nav a { padding: .6rem .8rem; border-radius: 9px; color: #bec8d5; font-weight: 600; text-decoration: none; }
+    nav a:hover, nav a[aria-current="page"] { background: #233b32; color: #e7fff3; }
+    nav form { margin: 0; }
+    main { width: min(1200px, 100%); margin: 0 auto; padding: 28px; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 24px; letter-spacing: -.02em; }
+    h2 { font-size: 16px; letter-spacing: -.02em; }
+    a { color: var(--accent); }
+    a:hover { color: #b6f2d8; }
+    button, input, select, textarea { font: inherit; }
+    button, .button {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 40px; padding: .6rem .9rem; border: 1px solid var(--border);
+      border-radius: 9px; background: #1b2430; color: #e9eef5;
+      font-weight: 600; text-decoration: none; cursor: pointer;
+    }
+    button:hover, .button:hover { border-color: #3b4a5d; background: #242f3d; color: #edf1f7; }
+    button.primary, .button.primary { border-color: var(--accent); background: var(--accent); color: #12221b; }
+    button.primary:hover, .button.primary:hover { background: #a7eccf; }
+    button.danger { color: #ffb4ad; }
+    a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    label { display: block; margin-top: 16px; color: #bec8d5; font-size: 13px; font-weight: 600; }
+    input:not([type="hidden"]), select, textarea {
+      max-width: 100%; min-width: 0; padding: .75rem .9rem;
+      border: 1px solid var(--border); border-radius: 10px;
+      background: #0f141c; color: #edf1f7;
+    }
+    input[type="text"], input[type="password"], input[type="url"], textarea { width: 100%; }
+    input[type="number"] { width: 10rem; }
+    label input { display: block; margin-top: 6px; }
+    label + input, label + select, label + textarea { margin-top: 6px; }
+    textarea { resize: vertical; }
+    .panel, .card {
+      border: 1px solid var(--border); border-radius: 18px;
+      background: linear-gradient(145deg, #151c26, #11161e);
+    }
+    .panel { padding: clamp(20px, 4vw, 30px); }
+    .panel + .panel { margin-top: 22px; }
+    .panel h2 + p, .panel h1 + p { margin-top: 6px; }
+    .login-card { width: min(400px, 100%); margin: 8vh auto 0; background: var(--surface); }
+    .login-card form { margin-top: 24px; }
+    .login-card .primary { width: 100%; }
+    .eyebrow { margin-bottom: 5px; color: var(--accent); font-size: 11px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    .page-heading { margin-bottom: 22px; }
+    .card { padding: 18px; margin-top: 12px; background: #10151de8; overflow-wrap: anywhere; }
+    .card h2 + p { margin-top: 4px; color: var(--muted); }
+    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
     .actions form { margin: 0; }
-    .notice { border-left: .3rem solid #4587cf; padding: .5rem 1rem; background: light-dark(#edf5ff, #1d334a); }
-    .error { border-left-color: #db5e52; }
-    .muted { opacity: .8; }
+    .notice { margin: 0 0 18px; padding: .75rem 1rem; border: 1px solid #42695b; border-radius: 10px; background: #1a3028; overflow-wrap: anywhere; }
+    .error { border-color: #814a4a; background: #321f23; color: #ffcbc5; }
+    .muted { color: var(--muted); }
+    .help { margin: 6px 0; color: var(--muted); font-size: 12px; }
+    .section-heading { margin-top: 24px; }
+    .playlist-group + .playlist-group { margin-top: 28px; }
+    .playlist-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .playlist-group-heading h2 { min-width: 0; overflow-wrap: anywhere; }
+    .playlist-group-heading .button { flex: none; }
+    .playlist-card { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; border-radius: 12px; }
+    .playlist-card h3 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: #edf1f7; font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+    .playlist-card p { flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .playlist-actions { display: flex; flex: none; align-items: center; gap: 6px; }
+    .playlist-actions form { margin: 0; }
+    .playlist-actions .button, .playlist-actions button { min-height: 36px; padding: .4rem .65rem; }
+    @media (max-width: 640px) {
+      .account-bar { padding: 12px 14px 0; }
+      .brand { width: 100%; }
+      nav { width: 100%; }
+      main { padding: 18px 14px; }
+      .login-card { margin-top: 4vh; }
+      .panel, .card { border-radius: 15px; }
+      .playlist-card { gap: 6px; padding: 8px; border-radius: 12px; }
+      .playlist-actions { gap: 4px; }
+      .playlist-actions .button, .playlist-actions button { padding: .4rem .5rem; }
+    }
   </style>
 </head>
 <body>
-  <nav aria-label="Main navigation">
-    <strong>BragiServer</strong>
+  <header class="account-bar">
+    <a class="brand" href="{{ url_for('management.playlists') }}">Bragi <span>Server</span></a>
     {% if session.get("username") %}
-      <a href="{{ url_for('management.playlists') }}">Playlists</a>
-      {% if session.get("username") == "admin" %}
-        <a href="{{ url_for('management.users') }}">Users</a>
-        <a href="{{ url_for('management.settings') }}">Settings</a>
-      {% endif %}
-      <span class="muted">Signed in as {{ session.username }}</span>
-      <form method="post" action="{{ url_for('management.logout') }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit">Sign out</button>
-      </form>
+      <nav aria-label="Main navigation">
+        <a href="{{ url_for('management.playlists') }}" {% if request.endpoint == 'management.playlists' %}aria-current="page"{% endif %}>Playlists</a>
+        {% if session.get("username") == "admin" %}
+          <a href="{{ url_for('management.users') }}" {% if request.endpoint == 'management.users' %}aria-current="page"{% endif %}>Users</a>
+          <a href="{{ url_for('management.settings') }}" {% if request.endpoint == 'management.settings' %}aria-current="page"{% endif %}>Settings</a>
+        {% endif %}
+        <span class="muted">Signed in as {{ session.username }}</span>
+        <form method="post" action="{{ url_for('management.logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit">Sign out</button>
+        </form>
+      </nav>
     {% endif %}
-  </nav>
-  {% for message in get_flashed_messages() %}
-    <p class="notice" role="status">{{ message }}</p>
-  {% endfor %}
-  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
-  <main>{% block content %}{% endblock %}</main>
+  </header>
+  <main>
+    {% for message in get_flashed_messages() %}
+      <p class="notice" role="status">{{ message }}</p>
+    {% endfor %}
+    {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
 </body>
 </html>

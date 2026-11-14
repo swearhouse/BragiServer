@@ -140,10 +140,14 @@ def _owner() -> str:
 @management.get("/")
 def playlists():
     owner = _owner()
-    users = storage.read_users(_directory()) if session["username"] == "admin" else []
     library = storage.read_playlists(_directory())
+    owners = (
+        [user["username"] for user in storage.read_users(_directory())]
+        if session["username"] == "admin" else [owner]
+    )
     return render_template(
-        "playlists.html", owner=owner, users=users, playlists=library.get(owner, [])
+        "playlists.html",
+        playlist_groups=[(name, library.get(name, [])) for name in owners],
     )
 
 
@@ -161,30 +165,17 @@ def edit_playlist(playlist_id: str | None = None):
     playlist = existing or {"name": "", "videos": []}
     if request.method == "POST":
         name = request.form.get("name", "").strip()
-        names = request.form.getlist("video_name")
-        links = request.form.getlist("video_link")
-        videos = [
-            {"name": video_name.strip(), "link": link.strip()}
-            for video_name, link in zip(names, links)
-            if video_name.strip() or link.strip()
-        ]
-        playlist = {"name": name, "videos": videos}
-        if (
-            not name or len(name) > 200 or len(names) != len(links)
-            or len(videos) > 5000
-            or any(
-                not video["name"] or len(video["name"]) > 200
-                or not storage.valid_video_url(video["link"])
-                for video in videos
-            )
-        ):
+        if not name or len(name) > 200:
             return render_template(
-                "playlist_edit.html", owner=owner, playlist=playlist,
+                "playlist_edit.html", owner=owner, playlist={"name": name},
                 playlist_id=playlist_id,
-                error="Enter a playlist name and a name and HTTPS YouTube video URL for each track.",
+                error="Enter a playlist name of up to 200 characters.",
             ), 400
-        playlist["id"] = playlist_id or uuid.uuid4().hex
-        if not storage.save_playlist(_directory(), owner, playlist, create=playlist_id is None):
+        if playlist_id is None:
+            playlist = {"id": uuid.uuid4().hex, "name": name, "videos": []}
+            if not storage.save_playlist(_directory(), owner, playlist, create=True):
+                abort(404)
+        elif storage.rename_playlist(_directory(), owner, playlist_id, name) is None:
             abort(404)
         flash("Playlist saved.")
         return redirect(url_for("management.playlists", owner=owner))

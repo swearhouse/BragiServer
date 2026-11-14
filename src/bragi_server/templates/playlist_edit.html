@@ -1,60 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Edit playlist - BragiServer{% endblock %}
 {% block content %}
+<section class="panel">
+<p class="eyebrow">Library</p>
 <h1>{{ "Edit" if playlist_id else "Create" }} playlist</h1>
-<p>Owner: {{ owner }}</p>
+<p class="muted">Owner: {{ owner }}</p>
 <form method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="owner" value="{{ owner }}">
   <label for="name">Playlist name</label>
   <input id="name" name="name" type="text" maxlength="200" value="{{ playlist.name }}" required>
-  <h2>Tracks</h2>
-  <p>Enter a display name and an HTTPS YouTube video URL for each track.</p>
-  <div id="tracks">
-    {% for video in playlist.videos %}
-      <div class="card track">
-        <label>Track name <input name="video_name" type="text" maxlength="200" value="{{ video.name }}"></label>
-        <label>YouTube URL <input name="video_link" type="url" value="{{ video.link }}"></label>
-        <div class="actions">
-          <button type="button" class="move-up">Move up</button>
-          <button type="button" class="move-down">Move down</button>
-          <button type="button" class="remove-track">Remove track</button>
-        </div>
-      </div>
-    {% endfor %}
-  </div>
-  <template id="track-template">
-    <div class="card track">
-      <label>Track name <input name="video_name" type="text" maxlength="200"></label>
-      <label>YouTube URL <input name="video_link" type="url"></label>
-      <div class="actions">
-        <button type="button" class="move-up">Move up</button>
-        <button type="button" class="move-down">Move down</button>
-        <button type="button" class="remove-track">Remove track</button>
-      </div>
-    </div>
-  </template>
+  <p class="help">Manage tracks in a playback client.</p>
   <div class="actions">
-    <button id="add-track" type="button">Add track</button>
-    <button type="submit">Save playlist</button>
-    <a href="{{ url_for('management.playlists', owner=owner) }}">Cancel</a>
+    <button class="primary" type="submit">Save playlist</button>
+    <a class="button" href="{{ url_for('management.playlists', owner=owner) }}">Cancel</a>
   </div>
 </form>
-<script>
-  const tracks = document.getElementById("tracks");
-  document.getElementById("add-track").addEventListener("click", function() {
-    tracks.appendChild(document.getElementById("track-template").content.cloneNode(true));
-  });
-  tracks.addEventListener("click", function(event) {
-    const row = event.target.closest(".track");
-    if (!row) return;
-    if (event.target.classList.contains("remove-track")) row.remove();
-    if (event.target.classList.contains("move-up") && row.previousElementSibling) {
-      tracks.insertBefore(row, row.previousElementSibling);
-    }
-    if (event.target.classList.contains("move-down") && row.nextElementSibling) {
-      tracks.insertBefore(row.nextElementSibling, row);
-    }
-  });
-</script>
+</section>
 {% endblock %}
