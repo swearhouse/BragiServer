@@ -131,7 +131,10 @@ def test_playlist_edit_preserves_tracks_and_has_no_track_controls(app):
     assert response.status_code == 302
     playlist = storage.read_playlists(directory)["alice"][0]
     assert playlist["name"] == "Changed"
-    assert playlist["videos"] == [first, second]
+    assert [
+        {"name": video["name"], "link": video["link"]} for video in playlist["videos"]
+    ] == [first, second]
+    assert [video["id"] for video in playlist["videos"]]
 
 
 def test_invalid_playlist_name_does_not_change_playlist(app):

@@ -33,9 +33,9 @@ Cast playback. The client should use the
 receiver's reported state when connected, not present the server queue as
 proof that audio is playing. More details and unverified behavior are below.
 
-The playback API can create, rename, and delete playlists and add, replace, or remove
-tracks. Track reordering is not currently supported; user management remains in
-the server management UI.
+The playback API can create, rename, and delete playlists and add, replace, remove,
+or reorder tracks by stable track ID. Index/snapshot track mutations still work
+but are deprecated; user management remains in the server management UI.
 `admin` has broader management UI access but
 the playback API restricts every account, including `admin`, to its own data.
 
@@ -76,9 +76,9 @@ Changes apply immediately and are stored in the server's persistent
 `settings.json`. Only allow trusted sites. Same-origin web clients and native
 clients do not require a CORS entry.
 
-The API responds to preflight requests for `GET`, `POST`, `PATCH`, and `DELETE`, and
-allows `Authorization`, `Content-Type`, and `Range` headers for allowed
-origins. It exposes `Content-Length`, `Content-Range`, and `Accept-Ranges`.
+The API responds to preflight requests for `GET`, `POST`, `PUT`, `PATCH`, and
+`DELETE`, and allows `Authorization`, `Content-Type`, and `Range` headers for
+allowed origins. It exposes `Content-Length`, `Content-Range`, and `Accept-Ranges`.
 CORS is not authentication. Browsers can hide the actual response for a
 disallowed origin, so report network/CORS failures distinctly from an HTTP
 401 when the response is unavailable. HTTPS browser pages may also be
@@ -107,28 +107,33 @@ check the status and content type before parsing and handle missing responses.
       "name": "Example mix",
       "videos": [
         {
+          "id": "trk_01",
           "name": "First track",
           "link": "https://youtu.be/abcdefghijk",
           "thumbnail_url": "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg"
         },
         {
+          "id": "trk_02",
           "name": "Second track",
           "link": "https://youtu.be/12345678901",
           "thumbnail_url": "https://i.ytimg.com/vi/12345678901/hqdefault.jpg"
         }
       ]
     }
+
   ]
 }
 ```
 
 `playlists` may be empty. `videos` is ordered and may be empty. Each video has
-`name`, `link`, and `thumbnail_url`; entries may repeat and have no unique
-track ID. The server derives the thumbnail URL without fetching the image or
-changing the saved data. `thumbnail_url` is `null` when the saved link has
-no valid video ID. The client fetches images directly from YouTube and should
-show a placeholder when the URL is null or the image cannot be loaded.
-Treat playlist IDs as opaque and URL-encode them when used in a path.
+`id`, `name`, `link`, and `thumbnail_url`; entries may repeat but always have
+distinct track IDs. The server derives the thumbnail URL without fetching the
+image or changing the saved data. `thumbnail_url` is `null` when the saved link
+has no valid video ID. The client fetches images directly from YouTube and
+should show a placeholder when the URL is null or the image cannot be loaded.
+Treat playlist and track IDs as opaque; URL-encode playlist IDs when used in a
+path. Track IDs stay stable across reordering and title changes; replacing a
+link creates a new ID.
 
 ### Create an empty playlist
 
@@ -169,28 +174,50 @@ are allowed. Existing queue snapshots and playback are unchanged.
 A timed-out or disconnected request may still complete. Check the playlist
 again before retrying; an automatic retry could add a duplicate.
 
-### Replace or remove a song
+### Replace or remove a song by ID
 
-`PATCH /api/v1/playlists/<playlist-id>/tracks` accepts a replacement HTTPS
-YouTube `url`, plus the zero-based `index` and last-seen `videos` snapshot
-described below. The server fetches the new title and returns 200 with the
-updated `{"playlist": {...}}`. Invalid input returns 400, an unavailable
-playlist 404, a changed snapshot 409, and a failed title lookup 422. It
-replaces only the specified occurrence and leaves existing queues unchanged.
-
-`DELETE /api/v1/playlists/<playlist-id>/tracks` accepts a zero-based track
-index and the entire last-seen ordered track list, omitting derived thumbnail
-fields:
+`PATCH /api/v1/playlists/<playlist-id>/tracks/<track-id>` accepts a replacement
+HTTPS YouTube `url`:
 
 ```json
-{"index": 0, "videos": [{"name": "First track", "link": "https://youtu.be/abcdefghijk"}]}
+{"url": "https://youtu.be/12345678901"}
 ```
 
-It returns 200 with the updated `{"playlist": {...}}`. It removes only the
-specified occurrence, even when songs repeat. A changed track list returns
-409 and removes nothing; refresh before retrying. Invalid input returns 400
-and an unavailable playlist returns 404. Existing queues and playback are
-unchanged. If the request times out, check the playlist before retrying.
+The server fetches the new title and returns 200 with the updated
+`{"playlist": {...}}`; the replacement has **a new track ID**. Invalid input
+returns 400, a missing playlist or track 404, and failed title lookup 422.
+
+`DELETE /api/v1/playlists/<playlist-id>/tracks/<track-id>` removes exactly that
+track and returns 200 with the updated playlist. A missing playlist or track
+returns 404. Neither endpoint changes existing queue snapshots or playback. If
+a request times out, refresh the playlist before retrying.
+
+### Reorder tracks
+
+`PUT /api/v1/playlists/<playlist-id>/tracks/order` accepts every current track
+ID exactly once:
+
+```json
+{"track_ids": ["trk_02", "trk_01"]}
+```
+
+It returns 200 with the playlist in that order. Track IDs themselves do not
+change. Duplicated or malformed IDs return 400; a stale or incomplete set
+returns 409, so refresh before retrying.
+
+### Deprecated index/snapshot mutations
+
+`PATCH` and `DELETE /api/v1/playlists/<playlist-id>/tracks` without a track ID
+still accept a zero-based `index` plus the last-seen ordered `videos` list,
+omitting derived thumbnail fields. Include each track's `id` when available;
+legacy `{name, link}` entries are still accepted:
+
+```json
+{"index": 0, "videos": [{"id": "trk_01", "name": "First track", "link": "https://youtu.be/abcdefghijk"}]}
+```
+
+A changed track list or ID returns 409 and changes nothing. These responses
+include `Deprecation: true`; prefer the track-ID endpoints above for new clients.
 
 ### Create or replace the active queue
 
@@ -212,11 +239,13 @@ boolean, defaulting to `false`. A successful request returns 201:
     "shuffled": true,
     "videos": [
       {
+        "id": "trk_02",
         "name": "Second track",
         "link": "https://youtu.be/12345678901",
         "thumbnail_url": "https://i.ytimg.com/vi/12345678901/hqdefault.jpg"
       },
       {
+        "id": "trk_01",
         "name": "First track",
         "link": "https://youtu.be/abcdefghijk",
         "thumbnail_url": "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg"
@@ -229,7 +258,8 @@ boolean, defaulting to `false`. A successful request returns 201:
 The queue is an ordered snapshot, not resolved audio or the Cast receiver
 queue. Shuffle does not modify the saved playlist; a random shuffle can
 produce the original order. Playlist edits after creation do not update this
-snapshot. A queue ID identifies a particular creation, not a track.
+snapshot. A queue ID identifies a particular creation, not a track; each
+queued video keeps the stable track ID from the playlist.
 
 Each user has exactly one active server queue; a successful POST replaces it,
 including when another client created it. Failed requests do not replace it.
@@ -397,8 +427,9 @@ The browser audio proxy does not refresh its source.
 ## Client validation checklist
 
 - Test valid and invalid credentials, no playlists, and user isolation.
-- Verify playlist order, duplicates, empty playlists, shuffle, queue
-  replacement, server restart, and a second client changing the same queue.
+- Verify playlist order, duplicates, empty playlists, track-ID replacement and
+  reordering, stale ID conflicts, shuffle, queue replacement, server restart,
+  and a second client changing the same queue.
 - Exercise malformed requests, failed resolution, non-JSON errors, timeouts,
   and a timed-out queue creation. Never log credentials or stream URLs.
 - For a web client, test allowed and disallowed CORS origins, preflight,

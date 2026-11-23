@@ -1,9 +1,11 @@
+import gzip
+import hashlib
 import logging
 import os
 from pathlib import Path
 from threading import RLock
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 from bragi_server import storage
 from bragi_server.audio_proxy import AudioTokenStore, CastQueueTokenStore
@@ -41,6 +43,49 @@ def _read_boolean_setting(variable_name: str, default: bool = False) -> bool:
     raise ValueError(f"{variable_name} must be a boolean value.")
 
 
+def _add_json_etag(response):
+    if (
+        request.method != "GET"
+        or response.status_code != 200
+        or response.mimetype != "application/json"
+        or response.direct_passthrough
+        or "no-store" in response.headers.get("Cache-Control", "").lower()
+    ):
+        return response
+    data = response.get_data()
+    digest = hashlib.sha256(data).hexdigest()
+    etag = f'"{digest}"'
+    response.headers["ETag"] = etag
+    if_none_match = request.headers.get("If-None-Match", "").strip()
+    candidates = {
+        item.strip().removeprefix("W/").strip('"')
+        for item in if_none_match.split(",")
+        if item.strip()
+    }
+    if if_none_match == "*" or digest in candidates:
+        response.status_code = 304
+        response.set_data(b"")
+    return response
+
+
+def _gzip_json(response):
+    if (
+        response.status_code != 200
+        or response.mimetype != "application/json"
+        or response.direct_passthrough
+        or "Content-Encoding" in response.headers
+        or "gzip" not in request.headers.get("Accept-Encoding", "").lower()
+    ):
+        return response
+    data = response.get_data()
+    if len(data) < 128:
+        return response
+    response.set_data(gzip.compress(data, mtime=0))
+    response.headers["Content-Encoding"] = "gzip"
+    response.vary.add("Accept-Encoding")
+    return response
+
+
 def create_app(data_directory: Path | str | None = None) -> Flask:
     bragi_log_level = _read_log_level("BRAGI_LOG_LEVEL")
     waitress_log_level = _read_log_level("WAITRESS_LOG_LEVEL")
@@ -68,10 +113,11 @@ def create_app(data_directory: Path | str | None = None) -> Flask:
     )
     try:
         storage.initialize_settings(app.config["DATA_DIRECTORY"])
+        storage.initialize_track_ids(app.config["DATA_DIRECTORY"])
     except storage.StorageError as error:
-        app.logger.exception("Could not initialize settings")
+        app.logger.exception("Could not initialize persistent data")
         app.extensions["bragi_event_log"].record(
-            "exception", "Could not initialize settings.", exception=error
+            "exception", "Could not initialize persistent data.", exception=error
         )
         raise
     app.secret_key = load_session_key(app.config["DATA_DIRECTORY"])
@@ -81,6 +127,10 @@ def create_app(data_directory: Path | str | None = None) -> Flask:
     app.extensions["cast_queue_tokens"] = CastQueueTokenStore()
     app.register_blueprint(management)
     app.register_blueprint(client_api)
+
+    @app.after_request
+    def optimize_json(response):
+        return _gzip_json(_add_json_etag(response))
 
     @app.get("/health")
     def health():

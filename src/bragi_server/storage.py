@@ -1,16 +1,20 @@
+import copy
 import json
 import logging
 import os
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from threading import RLock
 from urllib.parse import parse_qs, urlsplit
 
 
 _lock = RLock()
+_file_cache: dict[str, tuple[tuple[int, int] | None, object]] = {}
 DEFAULT_CAST_BATCH_SIZE = 16
 MAX_CAST_BATCH_SIZE = 5000
+TRACK_ID_PREFIX = "trk_"
 _YOUTUBE_HOSTS = {
     "youtube.com", "www.youtube.com", "m.youtube.com",
     "music.youtube.com", "youtu.be",
@@ -77,6 +81,56 @@ def valid_video_url(url: str) -> bool:
         return False
 
 
+def new_track_id() -> str:
+    return f"{TRACK_ID_PREFIX}{uuid.uuid4().hex}"
+
+
+def _legacy_track_id(playlist_id: str, index: int, link: str) -> str:
+    value = f"bragi:track:{playlist_id}:{index}:{link}"
+    return f"{TRACK_ID_PREFIX}{uuid.uuid5(uuid.NAMESPACE_URL, value).hex}"
+
+
+def _clean_track_id(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _valid_video(video: object) -> bool:
+    if not isinstance(video, dict) or set(video) not in (
+        {"name", "link"}, {"id", "name", "link"}
+    ):
+        return False
+    if (
+        not isinstance(video.get("name"), str) or not video["name"].strip()
+        or not isinstance(video.get("link"), str) or not valid_video_url(video["link"])
+    ):
+        return False
+    return "id" not in video or _clean_track_id(video["id"]) is not None
+
+
+def _normalize_video(video: dict, playlist_id: str, index: int) -> dict:
+    track_id = _clean_track_id(video.get("id"))
+    if track_id is None:
+        track_id = _legacy_track_id(playlist_id, index, video["link"])
+    return {"id": track_id, "name": video["name"], "link": video["link"]}
+
+
+def _track_identity(video: dict) -> dict:
+    return {"name": video["name"], "link": video["link"]}
+
+
+def tracks_match(stored: list[dict], expected: list[dict]) -> bool:
+    if len(stored) != len(expected):
+        return False
+    for current, candidate in zip(stored, expected):
+        if _track_identity(current) != _track_identity(candidate):
+            return False
+        if "id" in candidate and current.get("id") != _clean_track_id(candidate["id"]):
+            return False
+    return True
+
+
 def _read_json(path: Path, *, missing: object = None) -> object:
     try:
         with path.open(encoding="utf-8") as file:
@@ -87,6 +141,41 @@ def _read_json(path: Path, *, missing: object = None) -> object:
         raise StorageError(f"Missing {path.name}.") from error
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise StorageError(f"Could not read {path.name}.") from error
+
+
+def _cache_key(path: Path) -> str:
+    return str(path.resolve())
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _read_cached_json(path: Path, *, missing: object = None) -> object:
+    key = _cache_key(path)
+    signature = _file_signature(path)
+    with _lock:
+        cached = _file_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            return copy.deepcopy(cached[1])
+    data = _read_json(path, missing=missing)
+    if signature is not None:
+        with _lock:
+            _file_cache[key] = (signature, data)
+            if len(_file_cache) > 64:
+                _file_cache.pop(next(iter(_file_cache)))
+    return copy.deepcopy(data)
+
+
+def clear_storage_caches() -> None:
+    with _lock:
+        _file_cache.clear()
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -100,6 +189,8 @@ def _write_json(path: Path, data: object) -> None:
             json.dump(data, file, ensure_ascii=False, indent=2)
             file.write("\n")
         os.replace(temporary_path, path)
+        with _lock:
+            _file_cache.pop(_cache_key(path), None)
     except (OSError, TypeError, ValueError) as error:
         if temporary_path is not None:
             try:
@@ -110,7 +201,7 @@ def _write_json(path: Path, data: object) -> None:
 
 
 def read_settings(directory: Path) -> dict:
-    data = _read_json(directory / "settings.json")
+    data = _read_cached_json(directory / "settings.json")
     if not isinstance(data, dict):
         raise StorageError("settings.json has an invalid format.")
     origins = data.get("api_allowed_origins")
@@ -137,6 +228,15 @@ def initialize_settings(directory: Path) -> None:
         read_settings(directory)
 
 
+def initialize_track_ids(directory: Path) -> None:
+    with _lock:
+        path = directory / "user_playlists.json"
+        raw = _read_json(path, missing={})
+        library = read_playlists(directory)
+        if raw != library:
+            _write_json(path, library)
+
+
 def save_settings(directory: Path, origins: list[str], batch_size: int) -> None:
     if parse_allowed_origins("\n".join(origins)) != origins:
         raise ValueError("Origins must be distinct exact values.")
@@ -155,7 +255,7 @@ def save_allowed_origins(directory: Path, origins: list[str]) -> None:
 
 
 def read_users(directory: Path) -> list[dict[str, str]]:
-    data = _read_json(directory / "users.json")
+    data = _read_cached_json(directory / "users.json")
     users = data.get("users") if isinstance(data, dict) else None
     if not isinstance(users, list) or any(
         not isinstance(user, dict)
@@ -189,19 +289,25 @@ def read_playlists(directory: Path) -> dict[str, list[dict]]:
                 or not isinstance(playlist.get("name"), str)
                 or not playlist["name"].strip()
                 or not isinstance(playlist.get("videos"), list)
-                or any(
-                    not isinstance(video, dict)
-                    or set(video) != {"name", "link"}
-                    or not isinstance(video.get("name"), str)
-                    or not video["name"].strip()
-                    or not isinstance(video.get("link"), str)
-                    or not valid_video_url(video["link"])
-                    for video in playlist["videos"]
-                )
                 or playlist["id"] in ids
             ):
                 raise StorageError("user_playlists.json has an invalid format or duplicate IDs.")
             ids.add(playlist["id"])
+            normalized = []
+            seen_track_ids = set()
+            for index, video in enumerate(playlist["videos"]):
+                if not _valid_video(video):
+                    raise StorageError(
+                        "user_playlists.json has an invalid format or duplicate IDs."
+                    )
+                item = _normalize_video(video, playlist["id"], index)
+                if item["id"] in seen_track_ids:
+                    raise StorageError(
+                        "user_playlists.json has an invalid format or duplicate IDs."
+                    )
+                seen_track_ids.add(item["id"])
+                normalized.append(item)
+            playlist["videos"] = normalized
     return data
 
 
@@ -302,7 +408,9 @@ def append_playlist_track(
             return None
         if len(playlist["videos"]) >= 5000:
             raise ValueError("The playlist already contains 5000 tracks.")
-        playlist["videos"].append(video)
+        playlist["videos"].append({
+            "id": new_track_id(), "name": video["name"], "link": video["link"]
+        })
         _write_json(directory / "user_playlists.json", library)
         return playlist
 
@@ -333,11 +441,83 @@ def _change_playlist_track(
         )
         if playlist is None:
             return None
-        if playlist["videos"] != expected_videos:
+        if not tracks_match(playlist["videos"], expected_videos):
             raise PlaylistChangedError
         if replacement is None:
             del playlist["videos"][index]
         else:
-            playlist["videos"][index] = replacement
+            playlist["videos"][index] = {
+                "id": new_track_id(), "name": replacement["name"],
+                "link": replacement["link"],
+            }
+        _write_json(directory / "user_playlists.json", library)
+        return playlist
+
+
+def remove_playlist_track_by_id(
+    directory: Path, username: str, playlist_id: str, track_id: str
+) -> dict | None:
+    with _lock:
+        library = read_playlists(directory)
+        playlist = next(
+            (item for item in library.get(username, []) if item["id"] == playlist_id),
+            None,
+        )
+        if playlist is None:
+            return None
+        index = next(
+            (index for index, video in enumerate(playlist["videos"])
+             if video["id"] == track_id),
+            None,
+        )
+        if index is None:
+            return None
+        del playlist["videos"][index]
+        _write_json(directory / "user_playlists.json", library)
+        return playlist
+
+
+def replace_playlist_track_by_id(
+    directory: Path, username: str, playlist_id: str,
+    track_id: str, video: dict[str, str],
+) -> dict | None:
+    with _lock:
+        library = read_playlists(directory)
+        playlist = next(
+            (item for item in library.get(username, []) if item["id"] == playlist_id),
+            None,
+        )
+        if playlist is None:
+            return None
+        index = next(
+            (index for index, item in enumerate(playlist["videos"])
+             if item["id"] == track_id),
+            None,
+        )
+        if index is None:
+            return None
+        playlist["videos"][index] = {
+            "id": new_track_id(), "name": video["name"], "link": video["link"]
+        }
+        _write_json(directory / "user_playlists.json", library)
+        return playlist
+
+
+def reorder_playlist_tracks(
+    directory: Path, username: str, playlist_id: str, track_ids: list[str]
+) -> dict | None:
+    with _lock:
+        library = read_playlists(directory)
+        playlist = next(
+            (item for item in library.get(username, []) if item["id"] == playlist_id),
+            None,
+        )
+        if playlist is None:
+            return None
+        current_ids = [video["id"] for video in playlist["videos"]]
+        if len(track_ids) != len(current_ids) or set(track_ids) != set(current_ids):
+            raise PlaylistChangedError
+        by_id = {video["id"]: video for video in playlist["videos"]}
+        playlist["videos"] = [by_id[track_id] for track_id in track_ids]
         _write_json(directory / "user_playlists.json", library)
         return playlist

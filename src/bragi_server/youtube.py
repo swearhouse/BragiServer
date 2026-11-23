@@ -1,4 +1,6 @@
 import re
+import threading
+import time
 from urllib.parse import parse_qs, urlsplit
 
 from yt_dlp import YoutubeDL
@@ -14,6 +16,17 @@ _YOUTUBE_HOSTS = {
 }
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 _AUDIO_TYPES = {"m4a": "audio/mp4", "webm": "audio/webm"}
+_RESOLVE_FRESH_SECONDS = 120
+_RESOLVE_STALE_SECONDS = 600
+_RESOLVE_CACHE_MAX_ENTRIES = 64
+_TITLE_TTL_SECONDS = 86400
+_TITLE_CACHE_MAX_ENTRIES = 512
+_resolve_cache: dict[tuple[str, str], tuple[float, dict[str, str]]] = {}
+_resolve_cache_lock = threading.RLock()
+_resolve_refreshing: set[tuple[str, str]] = set()
+_resolve_generation = 0
+_title_cache: dict[str, tuple[float, str]] = {}
+_title_cache_lock = threading.RLock()
 
 
 class ResolveError(Exception):
@@ -51,6 +64,31 @@ def youtube_video_id(value: str) -> str | None:
 
 
 def video_title(video_id: str) -> str:
+    now = time.monotonic()
+    with _title_cache_lock:
+        cached = _title_cache.pop(video_id, None)
+        if cached is not None:
+            stored_at, title = cached
+            if now - stored_at < _TITLE_TTL_SECONDS:
+                _title_cache[video_id] = cached
+                return title
+
+    title = _fetch_title(video_id)
+
+    with _title_cache_lock:
+        _title_cache.pop(video_id, None)
+        _title_cache[video_id] = (time.monotonic(), title)
+        while len(_title_cache) > _TITLE_CACHE_MAX_ENTRIES:
+            _title_cache.pop(next(iter(_title_cache)))
+    return title
+
+
+def clear_title_cache() -> None:
+    with _title_cache_lock:
+        _title_cache.clear()
+
+
+def _fetch_title(video_id: str) -> str:
     options = {
         "noplaylist": True,
         "skip_download": True,
@@ -81,7 +119,86 @@ def resolve_cast_audio(video_id: str) -> dict[str, str]:
     return _resolve_audio(video_id, "bestaudio[ext=m4a][protocol=https]")
 
 
+def clear_resolve_cache() -> None:
+    global _resolve_generation
+    with _resolve_cache_lock:
+        _resolve_generation += 1
+        _resolve_cache.clear()
+        _resolve_refreshing.clear()
+
+
+def _store_resolve_result(
+    key: tuple[str, str], result: dict[str, str], generation: int | None = None
+) -> None:
+    with _resolve_cache_lock:
+        if generation is not None and generation != _resolve_generation:
+            return
+        _resolve_cache.pop(key, None)
+        _resolve_cache[key] = (time.monotonic(), result)
+        while len(_resolve_cache) > _RESOLVE_CACHE_MAX_ENTRIES:
+            _resolve_cache.pop(next(iter(_resolve_cache)))
+
+
 def _resolve_audio(video_id: str, audio_format: str) -> dict[str, str]:
+    key = (video_id, audio_format)
+    now = time.monotonic()
+    with _resolve_cache_lock:
+        cached = _resolve_cache.pop(key, None)
+        if cached is not None:
+            stored_at, result = cached
+            age = now - stored_at
+            if age < _RESOLVE_FRESH_SECONDS:
+                _resolve_cache[key] = cached
+                return dict(result)
+            if age < _RESOLVE_STALE_SECONDS:
+                _resolve_cache[key] = cached
+                _schedule_resolve_refresh(key, video_id, audio_format)
+                return dict(result)
+
+    result = _fetch_audio(video_id, audio_format)
+    _store_resolve_result(key, result)
+    return dict(result)
+
+
+def _schedule_resolve_refresh(
+    key: tuple[str, str], video_id: str, audio_format: str
+) -> None:
+    with _resolve_cache_lock:
+        if key in _resolve_refreshing:
+            return
+        _resolve_refreshing.add(key)
+        generation = _resolve_generation
+    thread = threading.Thread(
+        target=_refresh_resolve_cache,
+        args=(key, video_id, audio_format, generation),
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:
+        with _resolve_cache_lock:
+            _resolve_refreshing.discard(key)
+
+
+def _refresh_resolve_cache(
+    key: tuple[str, str], video_id: str, audio_format: str, generation: int
+) -> None:
+    result = None
+    try:
+        result = _fetch_audio(video_id, audio_format)
+    except Exception:
+        pass
+    finally:
+        with _resolve_cache_lock:
+            if result is not None and generation == _resolve_generation:
+                _resolve_cache.pop(key, None)
+                _resolve_cache[key] = (time.monotonic(), result)
+                while len(_resolve_cache) > _RESOLVE_CACHE_MAX_ENTRIES:
+                    _resolve_cache.pop(next(iter(_resolve_cache)))
+            _resolve_refreshing.discard(key)
+
+
+def _fetch_audio(video_id: str, audio_format: str) -> dict[str, str]:
     options = {
         "format": audio_format,
         "noplaylist": True,

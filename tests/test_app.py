@@ -6,11 +6,13 @@ from unittest.mock import patch
 import pytest
 from yt_dlp.utils import DownloadError
 
+from bragi_server import storage
 from bragi_server.app import create_app
 from bragi_server.youtube import (
     ResolveError,
     resolve_audio,
     resolve_cast_audio,
+    video_title,
     youtube_video_id,
 )
 from bragi_server.event_log import BragiEventLog, EventLogError
@@ -101,6 +103,227 @@ def test_youtube_resolver_reports_yt_dlp_failure_without_exposing_details():
         with pytest.raises(ResolveError, match="YouTube audio resolution failed") as error:
             resolve_audio("abcdefghijk")
     assert "secret stream URL" not in str(error.value)
+
+
+def test_resolve_audio_reuses_a_recent_result():
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        extractor = youtube_dl.return_value.__enter__.return_value
+        extractor.extract_info.return_value = {
+            "url": "https://example.test/stream",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+
+        first = resolve_audio("abcdefghijk")
+        first["url"] = "https://example.test/mutated"
+        second = resolve_audio("abcdefghijk")
+
+    assert youtube_dl.call_count == 1
+    assert second["url"] == "https://example.test/stream"
+    assert second["title"] == "Test track"
+
+
+def test_resolve_cache_separates_audio_formats():
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "url": "https://example.test/stream",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+
+        resolve_audio("abcdefghijk")
+        resolve_cast_audio("abcdefghijk")
+
+    assert youtube_dl.call_count == 2
+
+
+def test_resolve_cache_serves_stale_result_and_refreshes_in_background(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("bragi_server.youtube.time.monotonic", lambda: clock[0])
+
+    class SynchronousThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
+
+        def start(self):
+            self.target(*self.args, **self.kwargs)
+
+    monkeypatch.setattr("bragi_server.youtube.threading.Thread", SynchronousThread)
+
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        extractor = youtube_dl.return_value.__enter__.return_value
+        extractor.extract_info.return_value = {
+            "url": "https://example.test/old",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+        first = resolve_audio("abcdefghijk")
+        extractor.extract_info.return_value = {
+            "url": "https://example.test/new",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+
+        clock[0] += 121
+        stale = resolve_audio("abcdefghijk")
+        assert first["url"] == "https://example.test/old"
+        assert stale["url"] == "https://example.test/old"
+        assert youtube_dl.call_count == 2
+
+        clock[0] += 1
+        assert resolve_audio("abcdefghijk")["url"] == "https://example.test/new"
+        assert youtube_dl.call_count == 2
+
+
+def test_resolve_cache_schedules_only_one_background_refresh(monkeypatch):
+    clock = [1000.0]
+    scheduled = []
+    monkeypatch.setattr("bragi_server.youtube.time.monotonic", lambda: clock[0])
+
+    class RecordingThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            scheduled.append(args)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr("bragi_server.youtube.threading.Thread", RecordingThread)
+
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "url": "https://example.test/stream",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+
+        resolve_audio("abcdefghijk")
+        clock[0] += 121
+        resolve_audio("abcdefghijk")
+        clock[0] += 2
+        resolve_audio("abcdefghijk")
+
+    assert len(scheduled) == 1
+
+
+def test_resolve_cache_fetches_inline_after_hard_expiry(monkeypatch):
+    clock = [1000.0]
+    scheduled = []
+    monkeypatch.setattr("bragi_server.youtube.time.monotonic", lambda: clock[0])
+
+    class RecordingThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            scheduled.append(args)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr("bragi_server.youtube.threading.Thread", RecordingThread)
+
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "url": "https://example.test/stream",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+
+        resolve_audio("abcdefghijk")
+        clock[0] += 601
+        resolve_audio("abcdefghijk")
+
+    assert youtube_dl.call_count == 2
+    assert scheduled == []
+
+
+def test_failed_background_refresh_keeps_the_stale_result(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("bragi_server.youtube.time.monotonic", lambda: clock[0])
+
+    class SynchronousThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
+
+        def start(self):
+            self.target(*self.args, **self.kwargs)
+
+    monkeypatch.setattr("bragi_server.youtube.threading.Thread", SynchronousThread)
+
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        extractor = youtube_dl.return_value.__enter__.return_value
+        extractor.extract_info.return_value = {
+            "url": "https://example.test/old",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+        resolve_audio("abcdefghijk")
+        extractor.extract_info.side_effect = DownloadError("refresh failed")
+
+        clock[0] += 121
+        assert resolve_audio("abcdefghijk")["url"] == "https://example.test/old"
+        assert youtube_dl.call_count == 2
+
+
+def test_resolve_cache_evicts_the_least_recently_used_entry(monkeypatch):
+    monkeypatch.setattr("bragi_server.youtube._RESOLVE_CACHE_MAX_ENTRIES", 2)
+
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "url": "https://example.test/stream",
+            "title": "Test track",
+            "ext": "m4a",
+        }
+
+        for video_id in ("abcdefghijk", "12345678901", "abcdefghij2"):
+            resolve_audio(video_id)
+        assert youtube_dl.call_count == 3
+
+        resolve_audio("abcdefghijk")
+        assert youtube_dl.call_count == 4
+
+
+def test_resolve_cache_does_not_cache_failures():
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        youtube_dl.return_value.__enter__.return_value.extract_info.side_effect = DownloadError(
+            "failed"
+        )
+
+        for _ in range(2):
+            with pytest.raises(ResolveError, match="YouTube audio resolution failed"):
+                resolve_audio("abcdefghijk")
+
+    assert youtube_dl.call_count == 2
+
+
+def test_video_title_cache_reuses_recent_metadata():
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl:
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "title": "Video title", "fulltitle": "Video title"
+        }
+
+        assert video_title("abcdefghijk") == "Video title"
+        assert video_title("abcdefghijk") == "Video title"
+
+    assert youtube_dl.call_count == 1
+
+
+def test_storage_reads_are_cached_until_files_change(tmp_path):
+    users_path = tmp_path / "users.json"
+    settings_path = tmp_path / "settings.json"
+    storage._write_json(users_path, {"users": [{"username": "alice", "password": "one"}]})
+    storage._write_json(settings_path, {"api_allowed_origins": []})
+
+    with patch("bragi_server.storage._read_json", wraps=storage._read_json) as read_json:
+        assert storage.read_users(tmp_path)[0]["password"] == "one"
+        assert storage.read_users(tmp_path)[0]["password"] == "one"
+        assert storage.read_settings(tmp_path)["cast_batch_size"] == storage.DEFAULT_CAST_BATCH_SIZE
+        assert storage.read_settings(tmp_path)["cast_batch_size"] == storage.DEFAULT_CAST_BATCH_SIZE
+        assert read_json.call_count == 2
+
+    storage._write_json(users_path, {"users": [{"username": "alice", "password": "two"}]})
+    assert storage.read_users(tmp_path)[0]["password"] == "two"
 
 
 def test_log_level_environment_variables_configure_separate_loggers(

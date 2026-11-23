@@ -1,6 +1,7 @@
 import hmac
 import http.client
 import random
+import threading
 import uuid
 
 from flask import Blueprint, Response, current_app, g, jsonify, redirect, request, url_for
@@ -23,6 +24,52 @@ from bragi_server.youtube import MetadataError, ResolveError, resolve_audio, res
 
 
 client_api = Blueprint("client_api", __name__, url_prefix="/api/v1")
+_PREFETCH_TRACK_COUNT = 3
+_PREFETCH_ENABLED = True
+
+
+def _prefetch_links(links, *, cast: bool = False) -> None:
+    for link in links:
+        video_id = youtube_video_id(link)
+        if video_id is None:
+            continue
+        try:
+            video_title(video_id)
+        except MetadataError:
+            pass
+        try:
+            if cast:
+                resolve_cast_audio(video_id)
+            else:
+                resolve_audio(video_id)
+        except ResolveError:
+            pass
+
+
+def _start_prefetch(links, *, cast: bool = False) -> None:
+    if not _PREFETCH_ENABLED:
+        return
+    links = tuple(links)[:_PREFETCH_TRACK_COUNT]
+    if not links:
+        return
+    threading.Thread(
+        target=_prefetch_links, args=(links,), kwargs={"cast": cast}, daemon=True
+    ).start()
+
+
+def _following_queue_links(video_id: str) -> tuple[str, ...]:
+    with current_app.extensions["playback_queues_lock"]:
+        queue = current_app.extensions["playback_queues"].get(g.api_username)
+        if queue is None:
+            return ()
+        links = tuple(video["link"] for video in queue["videos"])
+    index = next(
+        (index for index, link in enumerate(links) if youtube_video_id(link) == video_id),
+        None,
+    )
+    if index is None:
+        return ()
+    return links[index + 1:]
 
 
 def _with_thumbnails(item: dict) -> dict:
@@ -47,13 +94,29 @@ def _playlist_video_title(video_id: str) -> str:
         raise
 
 
+def _valid_track_id(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_track_id_order(track_ids) -> bool:
+    return (
+        isinstance(track_ids, list)
+        and all(_valid_track_id(track_id) for track_id in track_ids)
+        and len({track_id.strip() for track_id in track_ids}) == len(track_ids)
+    )
+
+
 def _valid_track_snapshot(index, videos) -> bool:
     return (
         type(index) is int and isinstance(videos, list)
         and 0 <= index < len(videos)
         and all(
-            isinstance(video, dict) and set(video) == {"name", "link"}
+            isinstance(video, dict) and set(video) in ({"name", "link"}, {"id", "name", "link"})
             and isinstance(video["name"], str) and isinstance(video["link"], str)
+            and (
+                "id" not in video
+                or (isinstance(video["id"], str) and bool(video["id"].strip()))
+            )
             for video in videos
         )
     )
@@ -106,14 +169,29 @@ def authenticate():
 
 @client_api.after_request
 def client_api_headers(response):
-    response.headers["Cache-Control"] = "no-store"
+    snapshot_endpoints = {
+        "client_api.playlists", "client_api.playlist", "client_api.queue"
+    }
+    if (
+        request.method == "GET"
+        and request.endpoint in snapshot_endpoints
+        and response.status_code == 200
+    ):
+        response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+    else:
+        response.headers["Cache-Control"] = "no-store"
+    if request.endpoint in {
+        "client_api.delete_playlist_track", "client_api.replace_playlist_track"
+    }:
+        response.headers["Deprecation"] = "true"
     response.vary.add("Origin")
     origin = request.headers.get("Origin")
     if origin in g.get("api_allowed_origins", ()):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Range"
+        response.headers["Access-Control-Max-Age"] = "600"
         response.headers["Access-Control-Expose-Headers"] = (
             "Content-Length, Content-Range, Accept-Ranges"
         )
@@ -220,6 +298,89 @@ def add_playlist_track(playlist_id: str):
         return jsonify(playlist=_with_thumbnails(item)), 201
 
 
+@client_api.put("/playlists/<playlist_id>/tracks/order")
+def reorder_playlist_tracks(playlist_id: str):
+    payload = request.get_json(silent=True)
+    track_ids = payload.get("track_ids") if isinstance(payload, dict) else None
+    if not _valid_track_id_order(track_ids):
+        return jsonify(error="Provide each track ID exactly once."), 400
+    track_ids = [track_id.strip() for track_id in track_ids]
+
+    with current_app.extensions["playback_queues_lock"]:
+        if _authenticated_username() != g.api_username:
+            return _authentication_required()
+        try:
+            item = storage.reorder_playlist_tracks(
+                current_app.config["DATA_DIRECTORY"], g.api_username,
+                playlist_id, track_ids,
+            )
+        except storage.PlaylistChangedError:
+            return jsonify(error="The track IDs have changed. Refresh and try again."), 409
+        if item is None:
+            return jsonify(error="Playlist not found."), 404
+    return jsonify(playlist=_with_thumbnails(item))
+
+
+@client_api.delete("/playlists/<playlist_id>/tracks/<track_id>")
+def delete_playlist_track_by_id(playlist_id: str, track_id: str):
+    directory = current_app.config["DATA_DIRECTORY"]
+    library = storage.read_playlists(directory)
+    playlist = next(
+        (item for item in library.get(g.api_username, []) if item["id"] == playlist_id),
+        None,
+    )
+    if playlist is None:
+        return jsonify(error="Playlist not found."), 404
+    if not any(video["id"] == track_id for video in playlist["videos"]):
+        return jsonify(error="Track not found."), 404
+
+    with current_app.extensions["playback_queues_lock"]:
+        if _authenticated_username() != g.api_username:
+            return _authentication_required()
+        item = storage.remove_playlist_track_by_id(
+            directory, g.api_username, playlist_id, track_id
+        )
+        if item is None:
+            return jsonify(error="Track not found."), 404
+    return jsonify(playlist=_with_thumbnails(item))
+
+
+@client_api.patch("/playlists/<playlist_id>/tracks/<track_id>")
+def replace_playlist_track_by_id(playlist_id: str, track_id: str):
+    payload = request.get_json(silent=True)
+    url = payload.get("url") if isinstance(payload, dict) else None
+    video_id = youtube_video_id(url) if isinstance(url, str) else None
+    if video_id is None:
+        return jsonify(error="Enter a valid HTTPS YouTube video URL."), 400
+
+    directory = current_app.config["DATA_DIRECTORY"]
+    library = storage.read_playlists(directory)
+    playlist = next(
+        (item for item in library.get(g.api_username, []) if item["id"] == playlist_id),
+        None,
+    )
+    if playlist is None:
+        return jsonify(error="Playlist not found."), 404
+    if not any(video["id"] == track_id for video in playlist["videos"]):
+        return jsonify(error="Track not found."), 404
+
+    try:
+        title = _playlist_video_title(video_id)
+    except MetadataError:
+        return jsonify(error="Could not retrieve the YouTube video title."), 422
+
+    with current_app.extensions["playback_queues_lock"]:
+        if _authenticated_username() != g.api_username:
+            return _authentication_required()
+        item = storage.replace_playlist_track_by_id(
+            directory, g.api_username, playlist_id, track_id,
+            {"name": title, "link": url.strip()},
+        )
+        if item is None:
+            return jsonify(error="Track not found."), 404
+    return jsonify(playlist=_with_thumbnails(item))
+
+
 @client_api.delete("/playlists/<playlist_id>/tracks")
 def delete_playlist_track(playlist_id: str):
     payload = request.get_json(silent=True)
@@ -262,7 +423,7 @@ def replace_playlist_track(playlist_id: str):
     )
     if current is None:
         return jsonify(error="Playlist not found."), 404
-    if current["videos"] != videos:
+    if not storage.tracks_match(current["videos"], videos):
         return jsonify(error="The playlist has changed. Refresh and try again."), 409
     try:
         title = _playlist_video_title(video_id)
@@ -331,6 +492,7 @@ def queue():
             "videos": videos,
         }
         queues[g.api_username] = current
+        _start_prefetch(video["link"] for video in videos[1:])
         return jsonify(queue=_with_thumbnails(current)), 201
 
 
@@ -397,6 +559,7 @@ def cast_stream(index: int):
     except InvalidAudioURL:
         current_app.logger.warning("Cast audio resolver returned an unsupported destination.")
         return jsonify(error="Could not access the audio source."), 502
+    _start_prefetch(entry.videos[index + 1:], cast=True)
     with current_app.extensions["playback_queues_lock"]:
         if store.get(tokens[0], users_revision(directory)) is not entry:
             return jsonify(error="Invalid or expired Cast queue."), 401
@@ -533,4 +696,5 @@ def resolve():
         )
         current_app.logger.warning("Could not resolve audio for video %s", video_id)
         return jsonify(error=str(error)), 422
+    _start_prefetch(_following_queue_links(video_id))
     return jsonify(audio=audio)
