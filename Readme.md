@@ -181,7 +181,10 @@ audio stream:
 - `DELETE /api/v1/queue` clears the active queue and returns 204, including
   when there is no queue. This does not stop or change Chromecast playback.
 - `POST /api/v1/resolve` accepts `{"url": "https://youtu.be/<video-id>"}` and
-  returns `{"audio": {"url": "...", "title": "...", "content_type": "..."}}`.
+  returns `{"audio": {"url": "...", "title": "...", "content_type": "...",
+  "loudness": null | {"integrated_lufs": ..., "target_lufs": ..., "gain_db": ...,
+  "source": "youtube"}}}`. `gain_db` is the client-side adjustment that matches
+  YouTube's playback normalization for the selected stream.
   Invalid input returns 400; a resolution failure returns 422.
 - `POST /api/v1/cast-queue` accepts `{"queue_id": "<current queue id>"}`
   and returns a seven-day bearer token and `batch_size` for an immutable queue snapshot.

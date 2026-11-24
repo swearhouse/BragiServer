@@ -297,7 +297,13 @@ On success it returns 200:
   "audio": {
     "url": "https://temporary-audio.example/stream",
     "title": "Example title",
-    "content_type": "audio/mp4"
+    "content_type": "audio/mp4",
+    "loudness": {
+      "integrated_lufs": -13.01,
+      "target_lufs": -14.0,
+      "gain_db": -0.99,
+      "source": "youtube"
+    }
   }
 }
 ```
@@ -307,6 +313,12 @@ Pass it and the returned `content_type` to the Cast SDK; do not substitute a
 YouTube page URL. The current resolver selects supported m4a or webm audio
 and returns `audio/mp4` or `audio/webm`. It does not return an expiry time or
 guarantee that the receiver can play the selected stream.
+
+`loudness` is best-effort and may be `null`. When present, `gain_db` is the
+gain adjustment that matches YouTube's own playback normalization for the
+selected stream; apply it as a client-side gain before playback. It is tied to
+the returned `url`, and `integrated_lufs` / `target_lufs` are the measured and
+implied target loudness in LUFS.
 
 Invalid input or an unsupported video URL returns 400; extraction or lack of
 a supported direct stream returns 422. This resolver requires HTTPS YouTube

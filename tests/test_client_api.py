@@ -756,6 +756,12 @@ def test_resolve_validates_url_and_returns_temporary_audio(app):
         "url": "https://example.test/stream?signature=secret",
         "title": "Track",
         "content_type": "audio/mp4",
+        "loudness": {
+            "integrated_lufs": -13.01,
+            "target_lufs": -14.0,
+            "gain_db": -0.99,
+            "source": "youtube",
+        },
     }
     with patch("bragi_server.client_api.resolve_audio", return_value=audio) as resolver:
         assert client.post("/api/v1/resolve", json={"url": "https://youtu.be/abcdefghijk"}).status_code == 401

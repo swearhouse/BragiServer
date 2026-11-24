@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 from pathlib import Path
@@ -10,6 +11,7 @@ from bragi_server import storage
 from bragi_server.app import create_app
 from bragi_server.youtube import (
     ResolveError,
+    _fetch_player_response,
     resolve_audio,
     resolve_cast_audio,
     video_title,
@@ -93,6 +95,112 @@ def test_cast_resolver_requests_only_https_mp4_audio():
         }
         assert resolve_cast_audio("abcdefghijk")["content_type"] == "audio/mp4"
     assert youtube_dl.call_args.args[0]["format"] == "bestaudio[ext=m4a][protocol=https]"
+
+
+def test_youtube_resolver_returns_loudness_for_selected_format():
+    player_response = {
+        "streamingData": {
+            "adaptiveFormats": [
+                {
+                    "itag": 140,
+                    "mimeType": "audio/mp4",
+                    "url": "https://example.test/stream",
+                    "loudnessDb": 0.99,
+                    "trackAbsoluteLoudnessLkfs": -13.01,
+                }
+            ]
+        }
+    }
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl, patch(
+        "bragi_server.youtube._fetch_player_response", return_value=player_response
+    ):
+        extractor = youtube_dl.return_value.__enter__.return_value
+        extractor.extract_info.return_value = {
+            "url": "https://example.test/stream",
+            "title": "Test track",
+            "ext": "m4a",
+            "format_id": "140",
+        }
+        result = resolve_audio("abcdefghijk")
+
+    assert result["loudness"] == {
+        "integrated_lufs": -13.01,
+        "target_lufs": -14.0,
+        "gain_db": -0.99,
+        "source": "youtube",
+    }
+
+
+def test_youtube_loudness_matches_format_id_and_skips_drc_variant():
+    player_response = {
+        "streamingData": {
+            "adaptiveFormats": [
+                {
+                    "itag": 140,
+                    "url": "https://example.test/drc",
+                    "isDrc": True,
+                    "loudnessDb": 0,
+                    "trackAbsoluteLoudnessLkfs": -14,
+                },
+                {
+                    "itag": 140,
+                    "url": "https://example.test/standard",
+                    "loudnessDb": 3.14,
+                    "trackAbsoluteLoudnessLkfs": -10.86,
+                },
+            ]
+        }
+    }
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl, patch(
+        "bragi_server.youtube._fetch_player_response", return_value=player_response
+    ):
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "url": "https://example.test/signed",
+            "title": "Test track",
+            "ext": "m4a",
+            "format_id": "140",
+        }
+        result = resolve_audio("abcdefghijk")
+
+    assert result["loudness"]["gain_db"] == -3.14
+    assert result["loudness"]["integrated_lufs"] == -10.86
+    assert result["loudness"]["target_lufs"] == -14.0
+
+
+def test_youtube_resolver_tolerates_missing_loudness_values():
+    player_response = {
+        "streamingData": {
+            "adaptiveFormats": [
+                {"itag": 140, "url": "https://example.test/stream"}
+            ]
+        }
+    }
+    with patch("bragi_server.youtube.YoutubeDL") as youtube_dl, patch(
+        "bragi_server.youtube._fetch_player_response", return_value=player_response
+    ):
+        youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {
+            "url": "https://example.test/stream",
+            "title": "Test track",
+            "ext": "m4a",
+            "format_id": "140",
+        }
+        result = resolve_audio("abcdefghijk")
+
+    assert result["loudness"] is None
+
+
+def test_fetch_player_response_parses_initial_player_response():
+    player_response = {"streamingData": {"adaptiveFormats": []}}
+    page = (
+        "<html><script>var ytInitialPlayerResponse = "
+        + json.dumps(player_response)
+        + ";</script></html>"
+    )
+    with patch(
+        "bragi_server.youtube.urllib.request.urlopen",
+        return_value=io.BytesIO(page.encode("utf-8")),
+    ):
+        assert _fetch_player_response("abcdefghijk") == player_response
 
 
 def test_youtube_resolver_reports_yt_dlp_failure_without_exposing_details():
